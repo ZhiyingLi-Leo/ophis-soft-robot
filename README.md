@@ -45,4 +45,4 @@ make -C "control code/system_control" test
 
 仓库保留源代码、配置模板、固件烧录包、模型和文档；不提交 Python 环境、构建缓存、本机电缸配置和原始采集数据。实验数据保存在 `control code/local_dashboard/data/`，需另行备份；本仓库不替代数据存储。
 
-模型包含网页所需 GLB 和 STEP 源文件。第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。项目尚未指定开源许可证；私有仓库不授予对项目自有代码、模型和数据的公开再分发许可。
+模型包含网页所需 GLB 和 STEP 源文件。第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。项目尚未指定开源许可证；仓库公开可见不代表授予对项目自有代码、模型和数据的再分发许可。
