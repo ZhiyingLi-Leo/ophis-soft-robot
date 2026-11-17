@@ -1,0 +1,11 @@
+# Copy to cylinders.conf and verify limits against the physical assembly.
+propulsion=none
+auto_zero=false
+zero_tolerance_mm=0.05
+cylinder_port=auto
+cylinder_baud=115200
+deadzone=0.12
+# id,full_stroke_mm,assembly_min_mm,assembly_max_mm,max_speed_mm_s
+cylinder1=1,16,0,16,0.5
+cylinder2=2,16,0,16,0.5
+cylinder3=3,16,0,16,0.5

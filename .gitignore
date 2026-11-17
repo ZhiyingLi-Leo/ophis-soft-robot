@@ -1,0 +1,20 @@
+.DS_Store
+**/.venv/
+**/__pycache__/
+*.py[cod]
+**/.pytest_cache/
+**/.pio/
+**/build/
+**/bin/
+**/ros2_ws/install/
+**/ros2_ws/log/
+.vscode/
+.idea/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+control code/local_dashboard/data/
+control code/system_control/cylinders.conf
+control code/system_control/hardware.conf

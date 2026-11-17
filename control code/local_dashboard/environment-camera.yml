@@ -1,0 +1,9 @@
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pyrealsense2=2.58.3
+  - numpy>=1.24,<3
+  - pip
+  - pip:
+      - opencv-python-headless>=4.8,<5

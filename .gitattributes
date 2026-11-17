@@ -1,0 +1,5 @@
+*.step -text -diff
+*.glb binary
+*.bin binary
+*.jpg binary
+*.png binary

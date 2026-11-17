@@ -1,0 +1,13 @@
+# Copy to your hardware.conf and fill values from each physical cylinder.
+# Empty mechanical parameters intentionally have no hardware defaults.
+propulsion=nano
+propulsion_port=
+cylinder_port=
+cylinder_baud=115200
+max_speed=3200
+acceleration=3200
+deadzone=0.12
+# id,full_stroke_mm,assembly_min_mm,assembly_max_mm,max_speed_mm_s
+cylinder1=
+cylinder2=
+cylinder3=

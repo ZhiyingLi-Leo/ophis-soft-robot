@@ -1,0 +1,13 @@
+propulsion_pcb_controller:
+  ros__parameters:
+    joy_topic: /joy
+    axis_index: 3
+    stop_button_index: 6
+    max_speed: 3200
+    max_acceleration: 3200.0
+    deadzone: 0.12
+    joy_timeout: 0.5
+    serial_port: /dev/ttyACM0
+    baud_rate: 115200
+    dry_run: true
+    diagnostic: true

@@ -1,0 +1,9 @@
+firmware/.pio/
+__pycache__/
+*.pyc
+.venv/
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+tests/controller_test
+tests/controller_sim
