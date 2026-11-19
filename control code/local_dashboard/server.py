@@ -580,7 +580,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/connection-worker.js':('connection-worker.js','text/javascript'), '/scene.js':('scene.js','text/javascript'), '/camera.js':('camera.js','text/javascript'), '/gamepad.js':('gamepad.js','text/javascript'), '/style.css':('style.css','text/css')}
         vendors = ('three.module.js', 'GLTFLoader.js', 'OrbitControls.js', 'BufferGeometryUtils.js', 'RoomEnvironment.js')
         for name in vendors: files['/vendor/'+name] = ('vendor/'+name, 'text/javascript')
-        models = {'/models/cylinders.glb':'Triple_Cylinder_Syringes_V3.glb', '/models/advancer.glb':'Advancer_Assembly.glb'}
+        models = {'/models/cylinders.glb':'Triple_Cylinder_Syringes_V3.glb', '/models/advancer.glb':'Advancer_Assembly.glb', '/models/d405-stand.glb':'D405_Stand_H300.glb'}
         if self.path in models:
             path = ROOT.parent.parent/'3d model'/models[self.path]
             if not path.is_file(): self.send(404, {'error':'模型文件不存在'}); return

@@ -52,9 +52,9 @@ export function createScene(onSelect) {
   const hoseMaterials=channelColors.map(c=>material(c,.35,.03));
   // Schematic hydraulic paths connect the actual CAD assemblies, in metres.
   for(let i=0;i<3;i++) tube([[-.144,.030,(i-1)*.033],[-.123,.030,(i-1)*.033],[-.105,.052,(i-1)*.018],[-.09,.074,(i-1)*.004]],.0017,hoseMaterials[cylinderIdByLane[i]-1]);
-  tube([[-.092,.074,0],[.02,.074,0],[.185,.074,0]],.006,material(0x242c35,.55));
-  tube([[.185,.074,0],[.228,.074,0],[.267,.073,.006],[.303,.063,.027],[.322,.049,.052]],.0062,material(0x438fc1,.34));
-  const tip=new THREE.Mesh(new THREE.SphereGeometry(.0058,20,12),material(0x2c3a43));tip.position.set(.322,.049,.052);context.add(tip);
+  tube([[-.092,.074,0],[.02,.074,0],[.185,.074,0]],.003,material(0x242c35,.55));
+  tube([[.185,.074,0],[.237,.074,0],[.248,.073,.002],[.257,.070,.006],[.262,.066,.012]],.003,material(0x438fc1,.34));
+  const tip=new THREE.Mesh(new THREE.SphereGeometry(.0029,20,12),material(0x2c3a43));tip.position.set(.262,.066,.012);context.add(tip);
   // Airway is context only; never derived from actuator state or presented as measured.
   const airwayMat=new THREE.MeshStandardMaterial({color:0xcbd7df,roughness:.85,transparent:true,opacity:.12,depthWrite:false,side:THREE.DoubleSide});
   tube([[.215,.074,0],[.27,.074,0],[.33,.093,-.045],[.37,.10,-.065]],.018,airwayMat).castShadow=false;
@@ -70,7 +70,7 @@ export function createScene(onSelect) {
   const lights=[];
   for(let i=0;i<3;i++){const dot=new THREE.Mesh(new THREE.SphereGeometry(.0028,16,12),material(0xaebac5));dot.position.set(-.335,.027,(i-1)*.033);scene.add(dot);lights.push(dot);}
   const pLight=new THREE.Mesh(new THREE.SphereGeometry(.003,16,12),material(0xaebac5));pLight.position.set(.06,.042,.053);scene.add(pLight);
-  const namedAnchors=[['labelhydraulic',[-.245,.13,-.015],[-.245,.03,0]],['labeladvancer',[.055,.18,-.015],[.055,.075,0]],['labelcatheter',[.31,.16,-.005],[.3,.072,.025]]];
+  const namedAnchors=[['labelhydraulic',[-.245,.13,-.015],[-.245,.03,0]],['labeladvancer',[.055,.18,-.015],[.055,.075,0]],['labelcatheter',[.25,.13,.004],[.25,.073,.004]]];
   for(const [id,p,to] of namedAnchors){anchors.push({el:document.querySelector('#'+id),point:new THREE.Vector3(...p)});leaders.push(line([to,[to[0],p[1]-.008,to[2]]],0xc3ced8));}
   const feedbackLabels=[],feedbackLines=[];
   const overlay=document.createElementNS('http://www.w3.org/2000/svg','svg');
@@ -125,6 +125,20 @@ export function createScene(onSelect) {
       adv.scene.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(new THREE.Vector3(0,1,0),new THREE.Vector3(1,0,0),new THREE.Vector3(0,0,-1)));
       position(adv.scene,.06);scene.add(adv.scene);
       adv.scene.traverse(o=>{if(!o.isMesh)return;if(/whole_base/.test(o.name)){o.material.color.setHex(0x9caebd);o.material.metalness=.45;}if(/cover/.test(o.name)){o.material.color.setHex(0xc6d0d9);o.material.roughness=.6;}selectable.push(o);o.userData.component='advancer';});
+      loader.loadAsync('/models/d405-stand.glb').then(({scene: stand})=>{
+        prepare(stand);
+        stand.position.set(.251,0,-.110);
+        stand.traverse(part=>{
+          if(!part.isMesh)return;
+          part.material.color.setHex(part.name.includes('REF_Camera')?0x394958:0xaab8c3);
+          part.userData.component='camera';
+          selectable.push(part);
+        });
+        context.add(stand);
+      }).catch(error=>{
+        document.querySelector('#assetstatus').textContent='相机支架加载失败';
+        console.error(error);
+      });
       loaded=true;loading.style.display='none';document.querySelector('#assetstatus').textContent='';
     }catch(e){loading.innerHTML='<b>装配模型加载失败</b><small>请确认本地 3d model 中的两份 GLB 文件存在。控制面板仍可使用。</small>';document.querySelector('#assetstatus').textContent='模型不可用';console.error(e);}
   }
@@ -132,15 +146,15 @@ export function createScene(onSelect) {
     if(name==='hydraulic'){target=[-.245,.025,0];position=[-.10,.30,.36];span=.30;}
     else if(name==='advancer'){target=[.06,.05,0];position=[.23,.32,.36];span=.31;}
     else if(name==='top'){target=[-.005,.02,0];position=[-.005,.85,.0001];span=.84;}
-    else{target=[-.005,.04,0];position=[.13,.45,.79];span=.86;}
+    else{target=[-.005,.145,0];position=[.13,.555,.79];span=.86;}
     controls.target.set(...target);camera.position.set(...position);camera.userData.span=span;controls.update();resize();
     for(const b of document.querySelectorAll('[data-view]'))b.classList.toggle('active',b.dataset.view===name);
   }
-  function resize(){const w=stage.clientWidth,h=stage.clientHeight;if(!w||!h)return;renderer.setSize(w,h,false);let span=camera.userData.span||.86;const aspect=w/h;const vertical=Math.max(span/aspect,.29*(mode==='overview'||mode==='top'?1:.7));camera.left=-vertical*aspect/2;camera.right=vertical*aspect/2;camera.top=vertical/2;camera.bottom=-vertical/2;camera.updateProjectionMatrix();}
+  function resize(){const w=stage.clientWidth,h=stage.clientHeight;if(!w||!h)return;renderer.setSize(w,h,false);let span=camera.userData.span||.86;const aspect=w/h;const vertical=Math.max(span/aspect,(mode==='overview'?.42:mode==='top'?.29:.203));camera.left=-vertical*aspect/2;camera.right=vertical*aspect/2;camera.top=vertical/2;camera.bottom=-vertical/2;camera.updateProjectionMatrix();}
   new ResizeObserver(resize).observe(stage);
   const raycaster=new THREE.Raycaster();let down=null;
   canvas.addEventListener('pointerdown',e=>down=[e.clientX,e.clientY]);
-  canvas.addEventListener('pointerup',e=>{if(!down||Math.hypot(e.clientX-down[0],e.clientY-down[1])>5)return;const rect=canvas.getBoundingClientRect();raycaster.setFromCamera(new THREE.Vector2((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1),camera);const hits=raycaster.intersectObjects(selectable.filter(o=>mode==='hydraulic'?o.userData.lane!==undefined:mode==='advancer'?o.userData.component==='advancer':true),false);if(hits.length){const o=hits[0].object;if(o.userData.lane!==undefined){selected=axisIndexForLane(o.userData.lane);onSelect(selected);}else if(o.userData.component==='advancer'){document.dispatchEvent(new CustomEvent('componentselect',{detail:'prop'}));}}});
+  canvas.addEventListener('pointerup',e=>{if(!down||Math.hypot(e.clientX-down[0],e.clientY-down[1])>5)return;const rect=canvas.getBoundingClientRect();raycaster.setFromCamera(new THREE.Vector2((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1),camera);const hits=raycaster.intersectObjects(selectable.filter(o=>mode==='hydraulic'?o.userData.lane!==undefined:mode==='advancer'?o.userData.component==='advancer':true),false);if(hits.length){const o=hits[0].object;if(o.userData.lane!==undefined){selected=axisIndexForLane(o.userData.lane);onSelect(selected);}else if(o.userData.component){document.dispatchEvent(new CustomEvent('componentselect',{detail:o.userData.component==='camera'?'camera':'prop'}));}}});
   function render(){controls.update();
     if(loaded){roots.hydraulic.visible=mode!=='advancer';roots.advancer.visible=mode!=='hydraulic';context.visible=mode==='overview'||mode==='top';pLight.visible=mode!=='hydraulic';lights.forEach(l=>l.visible=mode!=='advancer');for(let i=0;i<3;i++){const a=state?.axes[axisIndexForLane(i)];const displacement=a?.online?Math.max(0,Math.min(a.stroke,a.position))/1000:0;for(const item of movers[i])item.mesh.position.z=item.z-displacement;lights[i].material.color.setHex(a?.error?0xb8514c:a?.moving?0xcb9639:a?.online?0x559985:0xbac4cc);}
       pLight.material.color.setHex(state?.propulsion.error?0xb8514c:state?.propulsion.speed?0xcb9639:state?.propulsion.online?0x559985:0xbac4cc);
