@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import json
 import math
+import sys
 import shutil
 import tempfile
 import threading
@@ -162,6 +163,14 @@ class D405Device:
             import numpy as np
             import cv2
             import pyrealsense2 as rs
+            if sys.platform=='darwin':
+                from .macos_camera import endpoint, receive
+                if endpoint().is_socket():
+                    try:
+                        receive(self,serial,rs)
+                        return
+                    except ConnectionRefusedError:
+                        pass
             devices=[d for d in rs.context().query_devices() if 'D405' in d.get_info(rs.camera_info.name)]
             if serial:devices=[d for d in devices if d.get_info(rs.camera_info.serial_number)==serial]
             if len(devices)!=1:raise RuntimeError('未找到唯一 D405；检查连接，多个设备时填写序列号')
@@ -189,30 +198,11 @@ class D405Device:
                 color=np.asanyarray(raw_color.get_data()).copy()
                 native=np.asanyarray(raw_depth.get_data()).copy()
                 aligned_array=np.asanyarray(depth.get_data()).copy()
-                with self.lock:settings=copy.deepcopy(self.settings)
-                measured,overlay=analyze(color,aligned_array.astype(float)*scale*1000,settings)
-                intr=depth.profile.as_video_stream_profile().intrinsics
-                points=[]
-                for pixel,z in zip(measured['curve_px'],measured.get('sample_depth_mm',[])):
-                    points.append(rs.rs2_deproject_pixel_to_point(intr,pixel,z) if z is not None else None)
-                measured['surface_curve_camera_mm']=points
-                if points and all(p is not None for p in points):
-                    p=np.array(points);a=p[4]-p[0];b=p[-1]-p[-5];den=np.linalg.norm(a)*np.linalg.norm(b)
-                    if den>1e-9:measured['surface_theta_deg']=float(np.degrees(np.arccos(np.clip(np.dot(a,b)/den,-1,1))))
-                ok,jpeg=cv2.imencode('.jpg',overlay,[cv2.IMWRITE_JPEG_QUALITY,80])
-                if not ok:raise RuntimeError('图像编码失败')
                 info=dict(host_receive_monotonic=received,host_wall_time=time.time(),
                           frame_number=raw_depth.get_frame_number(),color_frame_number=raw_color.get_frame_number(),
                           depth_timestamp_ms=raw_depth.get_timestamp(),color_timestamp_ms=raw_color.get_timestamp(),
-                          depth_clock=str(raw_depth.get_frame_timestamp_domain()),color_clock=str(raw_color.get_frame_timestamp_domain()),measurement=measured)
-                with self.lock:
-                    if self.halt.is_set():break
-                    self.jpeg=jpeg.tobytes()
-                    self.status.update(online=True,status='采集中',error='',last_frame_time=received,
-                                       frame_number=info['frame_number'],measurement=measured)
-                    self.status['processed_frames']+=1
-                    recording=self.recording is not None
-                if recording:self._save(dict(color_bgr=color,native_depth=native,aligned_depth=aligned_array),info)
+                          depth_clock=str(raw_depth.get_frame_timestamp_domain()),color_clock=str(raw_color.get_frame_timestamp_domain()))
+                self._publish(color,native,aligned_array,scale,depth.profile.as_video_stream_profile().intrinsics,info,rs)
         except Exception as e:
             with self.lock:self.status.update(online=False,error=str(e),status='连接失败 / 采集中断',measurement=None)
         finally:
@@ -223,3 +213,27 @@ class D405Device:
             with self.lock:
                 self.status['online']=False;self.jpeg=None
                 if self.halt.is_set():self.status['status']='未接入'
+
+    def _publish(self,color,native,aligned_array,scale,intr,info,rs):
+        import numpy as np
+        import cv2
+        with self.lock:settings=copy.deepcopy(self.settings)
+        measured,overlay=analyze(color,aligned_array.astype(float)*scale*1000,settings)
+        points=[]
+        for pixel,z in zip(measured['curve_px'],measured.get('sample_depth_mm',[])):
+            points.append(rs.rs2_deproject_pixel_to_point(intr,pixel,z) if z is not None else None)
+        measured['surface_curve_camera_mm']=points
+        if points and all(p is not None for p in points):
+            p=np.array(points);a=p[4]-p[0];b=p[-1]-p[-5];den=np.linalg.norm(a)*np.linalg.norm(b)
+            if den>1e-9:measured['surface_theta_deg']=float(np.degrees(np.arccos(np.clip(np.dot(a,b)/den,-1,1))))
+        info['measurement']=measured
+        ok,jpeg=cv2.imencode('.jpg',overlay,[cv2.IMWRITE_JPEG_QUALITY,80])
+        if not ok:raise RuntimeError('图像编码失败')
+        with self.lock:
+            if self.halt.is_set():return
+            self.jpeg=jpeg.tobytes()
+            self.status.update(online=True,status='采集中',error='',last_frame_time=info['host_receive_monotonic'],
+                               frame_number=info['frame_number'],measurement=measured)
+            self.status['processed_frames']+=1
+            recording=self.recording is not None
+        if recording:self._save(dict(color_bgr=color,native_depth=native,aligned_depth=aligned_array),info)

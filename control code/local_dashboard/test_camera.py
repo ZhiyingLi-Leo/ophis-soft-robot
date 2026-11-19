@@ -185,7 +185,9 @@ class VisionTests(unittest.TestCase):
             rs.stream=NS(depth='depth',color='color');rs.format=NS(z16='z16',bgr8='bgr8')
             rs.align.return_value.process.return_value=frames
             rs.rs2_deproject_pixel_to_point.side_effect=lambda i,p,z:[(p[0]-160)*z/300,(p[1]-120)*z/300,z]
-            with patch.dict('sys.modules',{'pyrealsense2':rs}):camera._capture('')
+            with patch('device_plugins.macos_camera.endpoint') as endpoint, patch.dict('sys.modules',{'pyrealsense2':rs}):
+                endpoint.return_value.is_socket.return_value=False
+                camera._capture('')
             items=[json.loads(x) for x in (path/'frames.jsonl').read_text().splitlines()]
             self.assertEqual(items[0]['kind'],'frame')
             self.assertEqual(items[0]['frame_number'],7)
