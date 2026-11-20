@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import json
 import math
+import re
 import sys
 import shutil
 import tempfile
@@ -35,7 +36,7 @@ class D405Device:
         self.jpeg=None;self.recording=None
         self.settings=dict(roi=[0.,0.,1.,1.],white_min=85,white_sat=100,length_mm=30.,diameter_mm=6.)
         self.status=dict(online=False,name='RealSense D405',status='未接入',error='',last_frame_time=None,
-                         frame_number=None,frame_age=None,measurement=None,calibration=None,
+                         frame_number=None,frame_age=None,measurement=None,measurement_settings=None,calibration=None,
                          processed_frames=0,recorded_frames=0,recording=False,session_path='',record_error='')
 
     def snapshot(self):
@@ -47,10 +48,10 @@ class D405Device:
             s['dependencies']=dependencies()
             return s
 
-    def preview(self):
+    def preview(self, *, with_settings=False):
         with self.lock:
             if not self.status['online'] or self.status['last_frame_time'] is None or time.monotonic()-self.status['last_frame_time']>2:return None
-            return self.jpeg
+            return (self.jpeg, self.status['measurement_settings']) if with_settings and self.jpeg else self.jpeg
 
     def command(self, operation, args, context=None):
         if operation not in self.operations:raise ValueError('相机不支持此操作')
@@ -72,7 +73,7 @@ class D405Device:
                         settings[key]=v
                 self.settings=settings
                 return {'settings':copy.deepcopy(settings)}
-        if operation=='record_start':return self.record_start(args.get('label',''))
+        if operation=='record_start':return self.record_start(args.get('label',''),args.get('group'))
         if operation=='record_stop':self.stop_recording('用户结束记录');return
         if operation=='annotate':
             with self.lock:
@@ -105,15 +106,19 @@ class D405Device:
         thread=self.thread
         if thread and thread is not threading.current_thread():thread.join(timeout=4)
 
-    def record_start(self, label):
+    def record_start(self, label, group=None):
         if not isinstance(label,str) or len(label)>100:raise ValueError('实验名称最多 100 字')
+        if group is not None and (not isinstance(group,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}',group)):
+            raise ValueError('实验分组名称无效')
         with self.lock:
             if not self.status['online'] or self.status['last_frame_time'] is None or time.monotonic()-self.status['last_frame_time']>1:
                 raise ValueError('相机没有新鲜图像')
             if self.recording:raise ValueError('相机已经在记录')
             self.data_root.mkdir(parents=True,exist_ok=True)
             if shutil.disk_usage(self.data_root).free<512*1024**2:raise ValueError('可用空间不足 512 MB')
-            path=Path(tempfile.mkdtemp(prefix=datetime.now().strftime('%Y%m%d_%H%M%S_'),dir=self.data_root))
+            directory = self.data_root / group if group is not None else self.data_root
+            directory.mkdir(exist_ok=True)
+            path=Path(tempfile.mkdtemp(prefix=datetime.now().strftime('%Y%m%d_%H%M%S_'),dir=directory))
             metadata=dict(label=label,created=datetime.now().astimezone().isoformat(),
                           settings=self.settings,calibration=self.status['calibration'],
                           depth_note='native_depth uses depth_scale_m; aligned_depth is unfilled and aligned to color',
@@ -233,7 +238,7 @@ class D405Device:
             if self.halt.is_set():return
             self.jpeg=jpeg.tobytes()
             self.status.update(online=True,status='采集中',error='',last_frame_time=info['host_receive_monotonic'],
-                               frame_number=info['frame_number'],measurement=measured)
+                               frame_number=info['frame_number'],measurement=measured,measurement_settings=settings)
             self.status['processed_frames']+=1
             recording=self.recording is not None
         if recording:self._save(dict(color_bgr=color,native_depth=native,aligned_depth=aligned_array),info)

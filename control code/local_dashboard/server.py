@@ -294,6 +294,26 @@ class Engine:
                 if self.experiment.process: raise ValueError('请先停止实验再清空输出')
                 self.experiment.output.clear(); self.experiment.command=''; return
             if op == 'script_run': self.experiment.start(str(body.get('command','')),client); return
+            if op == 'pretest_start' and not body.get('_script'):
+                limit = body.get('max_advance_mm')
+                if type(limit) not in (int, float) or not math.isfinite(limit) or not 0 < limit <= 48:
+                    raise ValueError('请填写本次允许的三轴增量之和上限（mm）')
+                camera = self.camera.snapshot()
+                settings = camera['settings']
+                if (not camera['online'] or camera['error'] or camera['recording'] or camera['frame_age'] is None
+                        or camera['frame_age'] > 1 or camera['measurement_settings'] != settings
+                        or body.get('settings') != settings or not (camera['measurement'] or {}).get('valid')):
+                    raise ValueError('请先应用识别区域并查看新鲜、有效的相机预览')
+                if any(a['moving'] for a in self.axes) or self.prop['armed'] or self.gamepad['active']:
+                    raise ValueError('请先结束当前控制或运动')
+                if not all(a['online'] and not a['error'] and time.monotonic()-a['last_seen']<1 for a in self.axes):
+                    raise ValueError('请接入并检查三根电缸的反馈')
+                self.experiment.start(f'python scripts/pretest.py --max-advance-mm {limit}',client,pretest=True)
+                return
+            if op in ('pretest_pause','pretest_resume') and not body.get('_script'):
+                self.experiment.set_pause(op == 'pretest_pause'); return
+            if op == 'pretest_progress' and body.get('_script'):
+                return self.experiment.pretest_progress(body['progress'],begin_round=body.get('begin_round') is True)
             if self.experiment.process is not None and not body.get('_script'):
                 raise ValueError('实验运行中，请先停止实验再手动控制')
             if op == 'device':
@@ -556,11 +576,12 @@ class Engine:
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
-    def send(self, code, data, kind='application/json'):
+    def send(self, code, data, kind='application/json', headers=None):
         raw = json.dumps(data, ensure_ascii=False).encode() if kind=='application/json' else data
         try:
             self.send_response(code); self.send_header('Content-Type', kind+('; charset=utf-8' if kind.startswith('text/') or kind=='application/json' else ''))
             self.send_header('Content-Length', str(len(raw))); self.send_header('Cache-Control', 'no-store')
+            for name, value in (headers or {}).items(): self.send_header(name, value)
             self.send_header('X-Content-Type-Options', 'nosniff'); self.end_headers(); self.wfile.write(raw)
         except (BrokenPipeError, ConnectionResetError):
             # A closing browser cannot receive the response; the control lease still expires.
@@ -572,9 +593,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.trusted(): self.send(403, {'error':'仅允许本机同源请求'}); return
         if self.path == '/api/state': self.send(200, self.server.engine.state()); return
         if self.path == '/api/camera/preview':
-            jpeg=self.server.engine.camera.preview()
-            if jpeg is None:self.send(404, {'error':'相机没有新鲜图像'})
-            else:self.send(200,jpeg,'image/jpeg')
+            preview=self.server.engine.camera.preview(with_settings=True)
+            if preview is None:self.send(404, {'error':'相机没有新鲜图像'})
+            else:
+                jpeg, settings = preview
+                self.send(200,jpeg,'image/jpeg',{'X-Camera-Settings':json.dumps(settings)})
             return
         files = {'/':('index.html','text/html'), '/app.js':('app.js','text/javascript'),
                  '/connection-worker.js':('connection-worker.js','text/javascript'), '/scene.js':('scene.js','text/javascript'), '/camera.js':('camera.js','text/javascript'), '/gamepad.js':('gamepad.js','text/javascript'), '/style.css':('style.css','text/css')}
@@ -610,7 +633,7 @@ class Handler(BaseHTTPRequestHandler):
                     token=self.headers.get('X-Experiment-Token','')
                     if not engine.experiment.token or not secrets.compare_digest(token,engine.experiment.token): raise ValueError('实验已结束或凭证无效')
                     if time.monotonic()-engine.heartbeat_time() > 1.5: raise ValueError('浏览器已失联')
-                    if body.get('action') not in ('motor','motor_stop','motor_renew','propulsion','stop_prop','arm','move','move_group','jog','stop_axis','stop_all','device'):
+                    if body.get('action') not in ('motor','motor_stop','motor_renew','propulsion','stop_prop','arm','move','move_group','jog','stop_axis','stop_all','device','pretest_progress'):
                         raise ValueError('脚本不支持此操作')
                     body.update(client=engine.experiment.client,_script=True)
                     last_heartbeat=engine.heartbeat

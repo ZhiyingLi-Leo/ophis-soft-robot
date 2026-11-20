@@ -28,7 +28,10 @@ async function act(action, data = {}, quiet = false) {
 function statusText(axis) { return axis.error ? (axis.online&&axis.comm_failures?'通信恢复中':'故障') : !axis.online ? '未接入' : axis.moving ? '运动中' : axis.armed ? '已启用' : '已连接'; }
 function statusClass(axis) { return axis.error ? 'error' : !axis.online ? '' : axis.moving ? 'busy' : 'ready'; }
 function selectAxis(i) { selected=i; render(); }
-const cameraPanel=setupCamera(act);
+const cameraPanel=setupCamera(act,()=>{
+  showPage('overview');
+  $('#pretestopen').closest('.consolepanel').scrollIntoView({block:'start'});
+});
 setupGamepad(act,()=>state,client);
 $('#axes').innerHTML = Array.from({length:3}, (_,i) => `
   <article class="axis" id="axis${i}" style="--channel:${colors[i]}">
@@ -174,7 +177,7 @@ async function refresh(){
   }catch{
     state=null;cameraPanel.render(null);connectionWorker.postMessage({client,renewMotors:false});model.update(null,selected);for(let i=0;i<4;i++){$('#mstate'+i).textContent='反馈中断';$('#mspeed'+i).textContent=$('#mcurrent'+i).textContent='—';}for(let i=0;i<3;i++){$('#pos'+i).textContent='—';}$('#pstate').textContent='反馈中断';$('#connection').textContent='服务离线';$('#serverdot').className='dot fault';
     for(let i=0;i<3;i++){$('#status'+i).textContent='反馈中断';$('#status'+i).className='status error';$('#navdot'+i).className='dot fault';}
-    for(const button of document.querySelectorAll('.axes button,.propcontrols button,.motorcard button,#applygroup,#runcommand,#armgroup,#groupmove'))button.disabled=true;
+    for(const button of document.querySelectorAll('.axes button,.propcontrols button,.motorcard button,#applygroup,#runcommand,#armgroup,#groupmove,#pretestopen,#pretestpause,#pretestresume'))button.disabled=true;
   }finally{busy=false;}
 }
 
@@ -190,10 +193,33 @@ function renderConsole(){
   const names={idle:'空闲',running:'运行中',stopping:'停止中',completed:'已完成',failed:'执行失败',stopped:'已停止'};
   $('#scriptstate').textContent=names[e.status]||e.status;
   $('#runcommand').disabled=['running','stopping'].includes(e.status);
+  $('#pretestopen').disabled=$('#runcommand').disabled;
+  const pretest=e.pretest, active=e.status==='running'&&!!pretest;
+  $('#pretestpause').hidden=!active||pretest.phase==='paused';
+  $('#pretestpause').disabled=e.pause_requested;
+  $('#pretestpause').textContent=e.pause_requested?'将在本轮结束后暂停':'本轮结束后暂停';
+  $('#pretestresume').hidden=!active||pretest.phase!=='paused';
+  $('#pretestresume').disabled=!e.pause_requested;
+  $('#pretestprogress').hidden=!pretest;
+  if(pretest){
+    const phases={baseline:'采集静止参考',ready:'参考姿态已记录',prepare:'记录起始姿态',advance:'推进中',hold:'目标位停留',return:'回参考位并等待稳定',export:'保存视频',round_complete:'本轮已保存',paused:'已暂停',done:'采集完成'};
+    const bar=$('#pretestbar');bar.max=pretest.total??27;bar.value=pretest.completed??0;
+    const round=pretest.point?` · 第 ${pretest.point} 点 (${pretest.offset_mm.join(', ')} mm) · 第 ${pretest.repeat} 轮`:'';
+    $('#pretestphase').textContent=`${active?(phases[pretest.phase]??'启动中'):names[e.status]} · 已保存 ${bar.value}/${bar.max}${round}`;
+    const angle=state.camera.measurement?.projected_signed_deg;
+    const fresh=active&&state.camera.online&&state.camera.frame_age!==null&&state.camera.frame_age<1;
+    const relative=fresh&&Number.isFinite(angle)&&Number.isFinite(pretest.zero_deg)?((angle-pretest.zero_deg+540)%360)-180:null;
+    const peak=pretest.last_round?` · 上一轮峰值 ${pretest.last_peak_deg===null?'不可分辨':pretest.last_peak_deg.toFixed(2)+'°'}`:'';
+    $('#pretestangle').textContent=`实时二维相对角 ${relative===null?'—':relative.toFixed(2)+'°'}${peak}`;
+    $('#pretestfiles').textContent=pretest.directory??'';
+  }
   const text=localOutput+(e.command?'\n$ '+e.command+'\n':'')+e.output;
   if($('#consoleoutput').textContent!==text){$('#consoleoutput').textContent=text||'输入 help 查看指令。';$('#consoleoutput').scrollTop=$('#consoleoutput').scrollHeight;}
   $('#commands').innerHTML=['help','scripts',...e.scripts.map(s=>'python '+s),'stop','clear'].map(s=>`<option value="${escapeHtml(s)}">`).join('');
 }
+$('#pretestopen').onclick=()=>{cameraPanel.beginPretest();showPage('camera');};
+$('#pretestpause').onclick=()=>act('pretest_pause');
+$('#pretestresume').onclick=()=>act('pretest_resume');
 $('#consoleform').onsubmit=async e=>{e.preventDefault();const c=$('#command').value.trim();if(!c)return;
   if(c==='help')localOutput='help — 指令帮助\nscripts — 列出本机实验脚本\npython scripts/name.py [参数] — 运行本机 Python\nstop — 中止实验并停止设备\nclear — 清空控制台输出\n\npython scripts/status.py\npython scripts/camera_check.py\npython scripts/camera_record.py --seconds 30 --label reference\npython scripts/sample_positions.py --help\npython scripts/motor_run.py --motor 1 --speed 400 --seconds 2\n\n脚本通过 experiment_api.Robot 控制已接入设备；脚本是具有本机权限的 Python 程序，不是沙箱。';
   else if(c==='scripts')localOutput=(state?.experiment.scripts||[]).join('\n');

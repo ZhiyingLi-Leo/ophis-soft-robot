@@ -36,7 +36,7 @@ def analyze(color, depth_mm, settings):
     kernel=np.ones((3,3),np.uint8)
     white=cv2.morphologyEx(white,cv2.MORPH_CLOSE,kernel)
     result=dict(valid=False, reason='未识别到橙色近端与白色柔性段', curve_px=[],
-                projected_theta_deg=None, depth_fraction=0., surface_theta_deg=None,
+                projected_theta_deg=None, projected_signed_deg=None, depth_fraction=0., surface_theta_deg=None,
                 surface_curve_camera_mm=[], coordinate_frame='camera',
                 measurement='未标定的可见表面估计；非三维中心线真值')
     overlay=color.copy()
@@ -84,8 +84,11 @@ def analyze(color, depth_mm, settings):
     def angle(a,b):
         norm=float(np.linalg.norm(a)*np.linalg.norm(b))
         return None if norm<1e-9 else float(np.degrees(np.arccos(np.clip(np.dot(a,b)/norm,-1,1))))
+    a,b=curve[4]-curve[0],curve[-1]-curve[-5]
+    projected=angle(a,b)
+    signed=math.degrees(math.atan2(a[0]*b[1]-a[1]*b[0],np.dot(a,b))) if projected is not None else None
     result.update(valid=True,reason='二维轮廓已提取；深度需实物验证',curve_px=curve.tolist(),
-                  projected_theta_deg=angle(curve[4]-curve[0],curve[-1]-curve[-5]))
+                  projected_theta_deg=projected, projected_signed_deg=signed)
     cv2.polylines(overlay,[curve.astype(np.int32)],False,(255,60,210),2)
     cv2.circle(overlay,tuple(curve[0].astype(int)),4,(255,100,0),-1)
     cv2.circle(overlay,tuple(curve[-1].astype(int)),4,(0,0,255),-1)
