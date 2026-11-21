@@ -185,7 +185,7 @@ setInterval(refresh,300);refresh();
 
 $('#devicepanel').onclick=()=>{const open=document.body.classList.toggle('devicesopen');$('#devicepanel').setAttribute('aria-expanded',String(open));};
 
-showPage('overview');
+showPage(window.location.hash==='#camera'?'camera':'overview');
 
 let localOutput='';
 function renderConsole(){

@@ -9,11 +9,13 @@
 #include <pwd.h>
 #include <unistd.h>
 #include <mach/mach_time.h>
+#include <chrono>
 #include <sstream>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <thread>
 
 template<class T> void array_json(std::ostream &out, const T &values) {
     out << '[';
@@ -49,6 +51,20 @@ bool pixels(int fd,rs2::video_frame frame) {
         if(!send_all(fd,data+y*frame.get_stride_in_bytes(),row)) return false;
     return true;
 }
+rs2::pipeline_profile start_camera(rs2::pipeline &pipe, rs2::context &context, rs2::config &config) {
+    for (int attempt = 1;; ++attempt) {
+        try {
+            return pipe.start(config);
+        } catch (const rs2::error &error) {
+            if (std::string(error.what()).find("failed to set power state") == std::string::npos) throw;
+            if (attempt == 3)
+                throw std::runtime_error("D405 USB 接口无法启动 (failed to set power state)。请结束占用相机的应用后重试。");
+            pipe = rs2::pipeline(context);
+            std::cerr << "D405 USB 接口尚未就绪，正在重试 (" << attempt + 1 << "/3)\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        }
+    }
+}
 int main(int argc, char **argv) try {
     if (argc > 2 || !getenv("SUDO_UID")) throw std::runtime_error("Run from Terminal using sudo");
     auto user = getpwuid(std::stoul(getenv("SUDO_UID")));
@@ -67,7 +83,7 @@ int main(int argc, char **argv) try {
     cfg.enable_device(serial);
     cfg.enable_stream(RS2_STREAM_DEPTH,640,480,RS2_FORMAT_Z16,30);
     cfg.enable_stream(RS2_STREAM_COLOR,640,480,RS2_FORMAT_BGR8,30);
-    auto profile=pipe.start(cfg);
+    auto profile=start_camera(pipe,ctx,cfg);
     if (setgroups(0,nullptr) || setgid(user->pw_gid) || setuid(user->pw_uid) || geteuid()==0)
         throw std::runtime_error("Cannot drop camera process privileges");
     std::string folder="/tmp/ophis-d405-"+std::to_string(getuid());

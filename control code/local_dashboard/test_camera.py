@@ -7,11 +7,34 @@ from pathlib import Path
 from unittest.mock import patch
 
 from device_plugins.realsense import D405Device
+from launch_d405 import launch
 from sampling import read_plan,require_camera,wait_stable
 from server import Engine
 
 CONFIG=Path(__file__).parent.parent/'system_control'/'cylinders.conf.example'
 VISION=bool(importlib.util.find_spec('cv2') and importlib.util.find_spec('numpy'))
+
+
+class LauncherTests(unittest.TestCase):
+    @patch('launch_d405.subprocess.Popen')
+    @patch('launch_d405.open_workbench')
+    @patch('launch_d405.bridge_listening', return_value=True)
+    @patch('launch_d405.workbench_state', return_value=None)
+    def test_reuses_bridge_without_requesting_sudo(self, state, listening, open_workbench, popen):
+        self.assertEqual(launch(8765, None), 0)
+        open_workbench.assert_called_once_with(8765, 'http://127.0.0.1:8765')
+        popen.assert_not_called()
+
+    @patch('launch_d405.subprocess.run')
+    @patch('launch_d405.subprocess.Popen')
+    @patch('launch_d405.open_workbench')
+    @patch('launch_d405.bridge_listening', side_effect=[False, False])
+    @patch('launch_d405.workbench_state', return_value=None)
+    def test_does_not_open_browser_after_bridge_start_failure(self, state, listening, open_workbench, popen, compile_helper):
+        popen.return_value.poll.return_value = 1
+        self.assertEqual(launch(8765, None), 1)
+        compile_helper.assert_called_once()
+        open_workbench.assert_not_called()
 
 
 class PluginTests(unittest.TestCase):
@@ -128,13 +151,16 @@ class VisionTests(unittest.TestCase):
         import numpy as np
         from device_plugins.vision import analyze
         settings=dict(roi=[0,0,1,1],white_min=85,white_sat=100)
-        result,_=analyze(self.image(),np.zeros((240,320)),settings)
+        original=self.image()
+        result,overlay=analyze(original,np.zeros((240,320)),settings)
         self.assertTrue(result['valid'])
         self.assertEqual(len(result['curve_px']),21)
         self.assertLess(result['projected_theta_deg'],10)
         self.assertEqual(result['depth_fraction'],0)
         self.assertIsNone(result['surface_theta_deg'])
         self.assertLess(result['curve_px'][0][0],result['curve_px'][-1][0])
+        x,y=np.rint(result['curve_px'][10]).astype(int)
+        np.testing.assert_array_equal(overlay[y,x],original[y,x])
 
     def test_background_and_missing_orange_are_invalid(self):
         import numpy as np

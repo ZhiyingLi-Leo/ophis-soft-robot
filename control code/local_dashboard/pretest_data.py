@@ -106,7 +106,6 @@ def export_videos(path, frames, angles, triggers):
                 writers[1].write(arrays['native_depth'])
             curve = np.rint(frame['measurement'].get('curve_px', [])).astype(np.int32)
             if len(curve) >= 2:
-                cv2.polylines(color, [curve], False, (255, 60, 210), 2)
                 cv2.circle(color, tuple(curve[0]), 4, (255, 100, 0), -1)
                 cv2.circle(color, tuple(curve[-1]), 4, (0, 0, 255), -1)
             stamp = frame['host_receive_monotonic'] - triggers['T0']['host_monotonic']

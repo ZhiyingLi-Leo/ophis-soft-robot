@@ -89,7 +89,6 @@ def analyze(color, depth_mm, settings):
     signed=math.degrees(math.atan2(a[0]*b[1]-a[1]*b[0],np.dot(a,b))) if projected is not None else None
     result.update(valid=True,reason='二维轮廓已提取；深度需实物验证',curve_px=curve.tolist(),
                   projected_theta_deg=projected, projected_signed_deg=signed)
-    cv2.polylines(overlay,[curve.astype(np.int32)],False,(255,60,210),2)
     cv2.circle(overlay,tuple(curve[0].astype(int)),4,(255,100,0),-1)
     cv2.circle(overlay,tuple(curve[-1].astype(int)),4,(0,0,255),-1)
     if depth_mm is None:return result,overlay

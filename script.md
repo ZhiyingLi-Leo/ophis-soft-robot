@@ -2,6 +2,8 @@
 
 ## 1. 启动工作台
 
+使用 D405 时，双击 `control code/local_dashboard/start_d405.command`。它会复用或启动相机桥接和工作台，再打开相机页。[D405 接入说明](control%20code/local_dashboard/CAMERA.md#macos-usb-采集会话)
+
 在 macOS 终端中逐行执行：
 
 ```sh
