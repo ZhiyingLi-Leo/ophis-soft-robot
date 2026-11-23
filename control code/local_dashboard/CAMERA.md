@@ -100,6 +100,25 @@ python scripts/export_session.py --session data/实际实验目录
 
 ## 位置表采样
 
+### 单轴、双轴和三轴分段采集
+
+在工作台接入 D405 和三轴反馈，将电缸停在 0 mm 参考位，在相机页确认 ROI 覆盖橙色近端和柔性段的活动范围，并看到有效三维角。各参与轴使用 0.5 mm/s。以下命令在网页实验控制台运行。
+
+```sh
+python scripts/collect_single.py --ids 1 --start-mm 1 --stop-mm 5 --step-mm 1 --max-advance-mm 5 --execute
+```
+
+第一段只启用 ID1。按 1、2、3、4、5 mm 扫三遍，共 15 轮，完成后停止。每轮在参考位记录 4 秒后标记 T0，编码器反馈到位并稳定后记录目标位 4 秒，回参考位稳定 2 秒后标记 T2。
+
+```sh
+python scripts/collect_dual.py --ids 1 2 --start-mm 2 --stop-mm 4 --step-mm 2
+python scripts/collect_triple.py --start-mm 2 --stop-mm 4 --step-mm 2
+```
+
+这两个示例预览双轴和三轴的组合数量。每个参与轴独立遍历同一位移范围，双轴为 4 个组合，三轴为 8 个组合。现场确认组合活动范围后，用 `--max-advance-mm` 填写允许的总推进量上限，加入 `--execute` 启动。双轴和三轴的一组目标由工作台一起更新，底层串口依次通信。双轴执行需要加载支持两轴协同的新版工作台服务。
+
+批次保存在 `data/axis_capture_…/`，`points.json` 列出计划与完成轮次。每轮独立保存 `frame_*.npz` 中的原始彩色、原生和对齐深度，`frames.jsonl` 中的反馈和阶段时间，以及 `metadata.json` 和 `round.json`。后者也保存根据预览角生成的 T1 峰值候选及参考噪声判据。离线重算以本轮 T0 前静止段为零点，使用编码器定义的目标停留段。
+
 ### 三电缸 Pre-test
 
 接入 D405 和三个电缸，把电缸停在实验参考位。按当前装配核对各轴 0.5 mm/s 的速度、并行推进和回退的安全路径，以及三轴推进增量之和上限。Pre-test 相对参考位的单轴最大增量为 2 mm，所有目标中最大组合增量之和为 4 mm。

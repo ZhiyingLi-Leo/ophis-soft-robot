@@ -385,13 +385,26 @@ class Engine:
                 self.log(f'电缸 {i+1} → {target:.3f} mm'); return
             if op == 'move_group':
                 values = body['values']
-                if len(values) != 3: raise ValueError('需要三个目标')
-                for a, v in zip(self.axes, values):
-                    if not a['online'] or not a['armed'] or a['error'] or not math.isfinite(float(v)) or not a['minimum'] <= float(v) <= a['maximum']:
-                        for i in range(3): self.stop_axis(i)
-                        raise ValueError('三轴协同需要全部启用且所有目标在范围内；已撤销三轴启用')
-                for a, v in zip(self.axes, values): a.update(target=float(v), moving=True, move_started=time.monotonic())
-                self.log('三轴目标已更新（非硬件同步）'); return
+                indices = body.get('axes', [0, 1, 2])
+                if (not isinstance(indices, list) or not 2 <= len(indices) <= 3
+                        or any(type(i) is not int or i not in range(3) for i in indices)
+                        or len(set(indices)) != len(indices) or not isinstance(values, list) or len(values) != len(indices)):
+                    raise ValueError('协同移动需要两个或三个不同的轴，并提供相同数量的目标')
+                axes = [self.axes[i] for i in indices]
+                try:
+                    targets = [float(v) for v in values]
+                    valid = all(a['online'] and a['armed'] and not a['error'] and a['minimum'] <= v <= a['maximum']
+                                for a, v in zip(axes, targets))
+                except (TypeError, ValueError, OverflowError):
+                    valid = False
+                if not valid:
+                    for i in indices: self.stop_axis(i)
+                    raise ValueError('协同移动要求所选轴已启用且目标在范围内；已撤销所选轴启用')
+                started = time.monotonic()
+                for a, target in zip(axes, targets):
+                    a.update(target=target, moving=True, move_started=started)
+                ids = ', '.join(str(a['id']) for a in axes)
+                self.log(f'电缸 {ids} 的协同目标已更新（非硬件同步）'); return
             if op == 'connect_prop':
                 if self.prop['online']: return
                 if self.mode == 'simulation': self.prop.update(online=True, error='', backend='sim', speed=0); return

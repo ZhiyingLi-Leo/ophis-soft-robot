@@ -235,6 +235,24 @@ class Tests(unittest.TestCase):
         self.e.prop['backend']='nano'
         with self.assertRaises(ValueError):self.command('motor',motor=0,value=200)
 
+    def test_dual_group_only_commands_selected_axes(self):
+        for i in range(3):
+            self.command('connect_axis', axis=i)
+        for i in (2, 0):
+            self.command('arm', axis=i)
+        self.command('move_group', axes=[2, 0], values=[2, 1])
+        first, parked, third = self.e.axes
+        self.assertEqual((first['target'], third['target']), (1, 2))
+        self.assertEqual(first['move_started'], third['move_started'])
+        self.assertFalse(parked['armed'] or parked['moving'])
+        self.assertEqual(parked['target'], 0)
+        with self.assertRaises(ValueError):
+            self.command('move_group', axes=[2, 2], values=[3, 4])
+        self.assertEqual((first['target'], third['target']), (1, 2))
+        with self.assertRaises(ValueError):
+            self.command('move_group', axes=[2, 0], values=[3, 17])
+        self.assertFalse(any(a['armed'] or a['moving'] for a in self.e.axes))
+
     def test_pcb_independent_wire_commands(self):
         from unittest.mock import Mock
         port=Mock();port.line.side_effect=lambda command,prefix:prefix

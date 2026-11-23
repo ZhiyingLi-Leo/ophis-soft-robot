@@ -37,6 +37,8 @@ class Robot:
     def arm(self, cylinder): self.command('arm',axis=cylinder-1)
     def move(self, cylinder, mm): self.command('move',axis=cylinder-1,value=mm)
     def move_all(self, values): self.command('move_group',values=values)
+    def move_group(self, cylinders, values):
+        self.command('move_group',axes=[cylinder-1 for cylinder in cylinders],values=values)
     def stop_cylinder(self, cylinder): self.command('stop_axis',axis=cylinder-1)
     def wait(self, seconds):
         deadline=time.monotonic()+seconds
