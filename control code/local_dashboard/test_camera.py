@@ -181,6 +181,45 @@ class VisionTests(unittest.TestCase):
         self.assertAlmostEqual(result['background_separation_mm'],50)
         self.assertEqual(result['coordinate_frame'],'camera')
 
+    def test_bend_out_of_image_plane_and_interior_gaps(self):
+        import numpy as np
+        from device_plugins.shape3d import fit_shape
+
+        angles = np.linspace(0,np.deg2rad(70),21)
+        radius = 30/angles[-1]
+        center = np.column_stack((radius*np.sin(angles), np.zeros(21), 150+radius*(1-np.cos(angles))))
+        tangent = np.column_stack((np.cos(angles), np.zeros(21), np.sin(angles)))
+        radial = center - np.sum(center*tangent,axis=1)[:,None]*tangent
+        surface = list(center - 3*radial/np.linalg.norm(radial,axis=1)[:,None])
+        shaft = [[x,0,147] for x in np.linspace(-15,0,9)]
+        surface[8:10] = [None,None]
+        shape = fit_shape(surface,shaft,6,30)
+        self.assertTrue(shape['valid'],shape['reason'])
+        self.assertAlmostEqual(shape['angle_deg'],59.5,delta=2)
+        np.testing.assert_allclose(shape['centerline_camera_mm'],center,atol=.5)
+        self.assertNotIn(8,shape['observed_indices'])
+        surface[-1] = None
+        invalid = fit_shape(surface,shaft,6,30)
+        self.assertFalse(invalid['valid'])
+        self.assertIsNone(invalid['angle_deg'])
+
+    def test_reconstruction_rejects_background_depth_inside_the_tip_mask(self):
+        import numpy as np
+        from device_plugins.vision import analyze
+
+        settings = dict(roi=[0,0,1,1],white_min=85,white_sat=100,length_mm=30,diameter_mm=6)
+        depth = np.full((240,320),200.)
+        depth[105:136,20:71] = 150.
+        depth[110:131,71:251] = 150.
+        deproject = lambda pixel,z:[(pixel[0]-160)*z/1000, (pixel[1]-120)*z/1000, z]
+        result,_ = analyze(self.image(),depth,settings,deproject=deproject)
+        self.assertTrue(result['shape_3d']['valid'],result['shape_3d']['reason'])
+        self.assertAlmostEqual(result['shape_3d']['angle_deg'],0,delta=1)
+        depth[110:131,232:251] = 200.
+        result,_ = analyze(self.image(),depth,settings,deproject=deproject)
+        self.assertEqual(result['depth_fraction'],1)
+        self.assertFalse(result['shape_3d']['valid'])
+
     def test_capture_driver_with_sdk_double_saves_timestamps_and_stops(self):
         import numpy as np
         from types import SimpleNamespace as NS

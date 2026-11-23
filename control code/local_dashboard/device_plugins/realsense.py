@@ -122,7 +122,7 @@ class D405Device:
             metadata=dict(label=label,created=datetime.now().astimezone().isoformat(),
                           settings=self.settings,calibration=self.status['calibration'],
                           depth_note='native_depth uses depth_scale_m; aligned_depth is unfilled and aligned to color',
-                          shape_note='surface estimate in camera coordinates; no base registration or radius correction',
+                          shape_note='shape_3d is a nominal-radius centreline estimate in camera mm; validate with known angles',
                           target_record_hz=5,timing_note='host receive time is not exposure time; per-axis feedback timestamps retained')
             (path/'metadata.json').write_text(json.dumps(metadata,ensure_ascii=False,indent=2))
             index=(path/'frames.jsonl').open('w')
@@ -223,10 +223,13 @@ class D405Device:
         import numpy as np
         import cv2
         with self.lock:settings=copy.deepcopy(self.settings)
-        measured,overlay=analyze(color,aligned_array.astype(float)*scale*1000,settings)
+        def deproject(pixel, depth_mm):
+            return [coordinate*1000 for coordinate in rs.rs2_deproject_pixel_to_point(intr,pixel,depth_mm/1000)]
+
+        measured,overlay=analyze(color,aligned_array.astype(float)*scale*1000,settings,deproject=deproject)
         points=[]
         for pixel,z in zip(measured['curve_px'],measured.get('sample_depth_mm',[])):
-            points.append(rs.rs2_deproject_pixel_to_point(intr,pixel,z) if z is not None else None)
+            points.append(deproject(pixel,z) if z is not None else None)
         measured['surface_curve_camera_mm']=points
         if points and all(p is not None for p in points):
             p=np.array(points);a=p[4]-p[0];b=p[-1]-p[-5];den=np.linalg.norm(a)*np.linalg.norm(b)

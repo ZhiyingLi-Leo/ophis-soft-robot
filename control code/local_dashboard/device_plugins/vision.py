@@ -2,6 +2,8 @@
 import math
 from collections import deque
 
+from .shape3d import reconstruct
+
 
 def thin(mask):
     import numpy as np
@@ -21,7 +23,7 @@ def thin(mask):
     return image[1:-1,1:-1]*255
 
 
-def analyze(color, depth_mm, settings):
+def analyze(color, depth_mm, settings, *, deproject=None):
     import cv2
     import numpy as np
     h,w=color.shape[:2]
@@ -38,6 +40,7 @@ def analyze(color, depth_mm, settings):
     result=dict(valid=False, reason='未识别到橙色近端与白色柔性段', curve_px=[],
                 projected_theta_deg=None, projected_signed_deg=None, depth_fraction=0., surface_theta_deg=None,
                 surface_curve_camera_mm=[], coordinate_frame='camera',
+                shape_3d={'valid':False,'angle_deg':None,'reason':'等待有效导管轮廓和对齐深度'},
                 measurement='未标定的可见表面估计；非三维中心线真值')
     overlay=color.copy()
     cv2.rectangle(overlay,(x0,y0),(x1-1,y1-1),(160,160,160),1)
@@ -103,4 +106,6 @@ def analyze(color, depth_mm, settings):
     valid=[v for v in depths if v is not None]
     result['background_separation_mm']=float(np.median(background)-np.median(valid)) if background.size and valid else None
     result['sample_depth_mm']=depths
+    if deproject is not None:
+        result['shape_3d']=reconstruct(depth_mm,orange,mask,green & allowed,curve,deproject,settings)
     return result,overlay

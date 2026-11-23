@@ -17,6 +17,7 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 from experiments import Experiments
+from pretest_data import shape_angle
 from device_plugins import DeviceRegistry, CylinderDevice, PropulsionDevice
 from device_plugins.realsense import D405Device
 
@@ -304,6 +305,8 @@ class Engine:
                         or camera['frame_age'] > 1 or camera['measurement_settings'] != settings
                         or body.get('settings') != settings or not (camera['measurement'] or {}).get('valid')):
                     raise ValueError('请先应用识别区域并查看新鲜、有效的相机预览')
+                if shape_angle(camera['measurement']) is None:
+                    raise ValueError('请先确认橙色近端与白色柔性段的三维中心线和角度有效')
                 if any(a['moving'] for a in self.axes) or self.prop['armed'] or self.gamepad['active']:
                     raise ValueError('请先结束当前控制或运动')
                 if not all(a['online'] and not a['error'] and time.monotonic()-a['last_seen']<1 for a in self.axes):
@@ -600,7 +603,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200,jpeg,'image/jpeg',{'X-Camera-Settings':json.dumps(settings)})
             return
         files = {'/':('index.html','text/html'), '/app.js':('app.js','text/javascript'),
-                 '/connection-worker.js':('connection-worker.js','text/javascript'), '/scene.js':('scene.js','text/javascript'), '/camera.js':('camera.js','text/javascript'), '/gamepad.js':('gamepad.js','text/javascript'), '/style.css':('style.css','text/css')}
+                 '/connection-worker.js':('connection-worker.js','text/javascript'), '/scene.js':('scene.js','text/javascript'), '/camera.js':('camera.js','text/javascript'), '/camera-shape.js':('camera-shape.js','text/javascript'), '/gamepad.js':('gamepad.js','text/javascript'), '/style.css':('style.css','text/css')}
         vendors = ('three.module.js', 'GLTFLoader.js', 'OrbitControls.js', 'BufferGeometryUtils.js', 'RoomEnvironment.js')
         for name in vendors: files['/vendor/'+name] = ('vendor/'+name, 'text/javascript')
         models = {'/models/cylinders.glb':'Triple_Cylinder_Syringes_V3.glb', '/models/advancer.glb':'Advancer_Assembly.glb', '/models/d405-stand.glb':'D405_Stand_H300.glb'}

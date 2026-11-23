@@ -28,3 +28,16 @@
 .pretestbar progress{display:block;width:100%;margin:10px 0 6px;accent-color:var(--blue)}
 #cpreview.drawing-enabled{cursor:crosshair;touch-action:none;user-select:none}
 #cropbox{position:absolute;border:2px solid #51d9ff;background:#51d9ff26;pointer-events:none}
+
+.camerashape{min-width:0;margin:0 26px 14px}
+#pretestShapeSlot .camerashape{margin:10px 0 0}
+.camerashape figcaption{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:0 0 8px}
+.camerashape figcaption span{color:var(--muted);font-size:12px}
+.camerashapeview{position:relative;background:#f6f8fb;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.camerashape canvas{display:block;width:100%;height:clamp(196px,32vw,310px);touch-action:none;cursor:grab}
+.camerashapeview p{position:absolute;top:12px;left:12px;margin:0;padding:6px 10px;color:var(--ink);background:#fffffff0;border-radius:5px;pointer-events:none}
+.camerashapeview p:empty{display:none}
+.camerashape canvas[hidden]{display:none}
+.camerashapeview:has(canvas[hidden]){min-height:46px}
+.camerashape .panelnote{margin:8px 0 0}
+@media(max-width:640px){.camerashape{margin-inline:14px}}

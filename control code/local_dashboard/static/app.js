@@ -206,11 +206,11 @@ function renderConsole(){
     const bar=$('#pretestbar');bar.max=pretest.total??27;bar.value=pretest.completed??0;
     const round=pretest.point?` · 第 ${pretest.point} 点 (${pretest.offset_mm.join(', ')} mm) · 第 ${pretest.repeat} 轮`:'';
     $('#pretestphase').textContent=`${active?(phases[pretest.phase]??'启动中'):names[e.status]} · 已保存 ${bar.value}/${bar.max}${round}`;
-    const angle=state.camera.measurement?.projected_signed_deg;
+    const shape=state.camera.measurement?.shape_3d;
     const fresh=active&&state.camera.online&&state.camera.frame_age!==null&&state.camera.frame_age<1;
-    const relative=fresh&&Number.isFinite(angle)&&Number.isFinite(pretest.zero_deg)?((angle-pretest.zero_deg+540)%360)-180:null;
-    const peak=pretest.last_round?` · 上一轮峰值 ${pretest.last_peak_deg===null?'不可分辨':pretest.last_peak_deg.toFixed(2)+'°'}`:'';
-    $('#pretestangle').textContent=`实时二维相对角 ${relative===null?'—':relative.toFixed(2)+'°'}${peak}`;
+    const angle=fresh&&shape?.valid?shape.angle_deg:null;
+    const peak=pretest.last_round?` · 上一轮 T1 ${pretest.last_peak_deg===null?'无有效三维角':pretest.last_peak_deg.toFixed(2)+'°'}${pretest.last_peak_status==='indistinguishable'?'（未超出参考抖动）':''}`:'';
+    $('#pretestangle').textContent=`实时三维弯曲角 ${angle===null?'—':angle.toFixed(2)+'°'}${peak}`;
     $('#pretestfiles').textContent=pretest.directory??'';
   }
   const text=localOutput+(e.command?'\n$ '+e.command+'\n':'')+e.output;

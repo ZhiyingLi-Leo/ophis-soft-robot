@@ -14,9 +14,10 @@ CONFIG = Path(__file__).parent.parent / 'system_control' / 'cylinders.conf.examp
 
 def example_capture():
     frames = [dict(frame_number=i, file=f'frame_{i:06}.npz', host_receive_monotonic=i/5,
-                   measurement=dict(projected_signed_deg=angle, curve_px=[[4, 10], [20, 14], [30, 21]]),
+                   measurement=dict(projected_signed_deg=170, shape_3d=dict(valid=i!=4, angle_deg=angle),
+                                    curve_px=[[4, 10], [20, 14], [30, 21]]),
                    telemetry=dict(axes=[dict(id=1, position=i/10, last_seen=i/5-.01)]))
-              for i, angle in enumerate([.1, 0, 2, 10, 90, 10, 3, 2, 0, .1, 0])]
+              for i, angle in enumerate([.1, 0, 2, 10, 90, 14, 3, 2, 0, .1, 0])]
     return frames, dict(T0=.2, target_hold=.6, **{'return':1.2}, T2=1.9)
 
 
@@ -37,6 +38,9 @@ class PretestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '新鲜、有效'):
             action('pretest_start', settings=settings, max_advance_mm=4)
         engine.camera.status['measurement_settings'] = settings
+        with self.assertRaisesRegex(ValueError, '三维中心线'):
+            action('pretest_start', settings=settings, max_advance_mm=4)
+        engine.camera.status['measurement']['shape_3d'] = dict(valid=True,angle_deg=10)
         with patch.object(engine.experiment, 'start') as start:
             action('pretest_start', settings=settings, max_advance_mm=4)
             start.assert_called_once_with('python scripts/pretest.py --max-advance-mm 4', 'test', pretest=True)
@@ -51,16 +55,21 @@ class PretestTests(unittest.TestCase):
         action('pretest_resume')
         self.assertTrue(engine.experiment.pretest_progress({'phase':'prepare'}, begin_round=True))
 
-    def test_triggers_follow_one_capture_and_suppress_noisy_peaks(self):
+    def test_triggers_use_only_valid_three_dimensional_frames(self):
         frames, events = example_capture()
         triggers, _, _ = summarize(frames, events, 0, .5)
         self.assertEqual(triggers['T0']['frame'], 1)
-        self.assertEqual(triggers['T1']['relative_angle_deg'], 10)
-        self.assertIn(triggers['T1']['frame'], (3, 4, 5))
+        self.assertEqual(triggers['T1']['angle_3d_deg'], 14)
+        self.assertEqual(triggers['T1']['frame'], 5)
         self.assertEqual(triggers['T1']['feedback'][0]['id'], 1)
         self.assertEqual(triggers['T2']['frame'], 9)
         quiet, _, _ = summarize(frames, events, 0, 20)
-        self.assertEqual(quiet['T1'], {'status':'indistinguishable', 'frame':None})
+        self.assertEqual(quiet['T1']['status'], 'indistinguishable')
+        self.assertEqual(quiet['T1']['angle_3d_deg'], 14)
+        for frame in frames:
+            del frame['measurement']['shape_3d']
+        missing, _, _ = summarize(frames, events, 0, .5)
+        self.assertEqual(missing['T1'], {'status':'no_valid_3d', 'frame':None})
 
     def test_preroll_starts_with_first_saved_frame(self):
         from types import SimpleNamespace

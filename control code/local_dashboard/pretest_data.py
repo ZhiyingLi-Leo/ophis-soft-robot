@@ -1,8 +1,8 @@
 """Summarize and export one D405 round from the original, timestamped frames."""
 
 import json
+import math
 from contextlib import ExitStack
-from statistics import median
 
 
 def read_capture(path):
@@ -20,39 +20,40 @@ def save_json(path, result):
     pending.replace(path)
 
 
-def relative_angle(angle, zero):
-    return None if angle is None else (angle - zero + 180) % 360 - 180
+def shape_angle(measurement):
+    shape = (measurement or {}).get('shape_3d') or {}
+    angle = shape.get('angle_deg')
+    if shape.get('valid') and type(angle) in (int, float) and math.isfinite(angle) and 0 <= angle <= 180:
+        return angle
+    return None
 
 
 def frame_angle(frame):
-    return frame['measurement'].get('projected_signed_deg')
+    return shape_angle(frame['measurement'])
 
 
-def summarize(frames, events, zero, noise):
+def summarize(frames, events, reference, noise):
     stamps = [frame['host_receive_monotonic'] for frame in frames]
-    angles = [relative_angle(frame_angle(frame), zero) for frame in frames]
+    angles = [frame_angle(frame) for frame in frames]
     cycle = [i for i, stamp in enumerate(stamps) if events['T0'] <= stamp <= events['T2']]
     if len(cycle) < 3:
         raise RuntimeError('T0–T2 内的记录帧不足')
     start, end = cycle[0], cycle[-1]
 
-    def trigger(i, stamp, angle=None):
+    def trigger(i, stamp):
         frame = frames[i]
         axes = sorted(frame['telemetry'].get('axes', []), key=lambda a: a['id'])
+        angle = angles[i]
         return dict(frame=frame['frame_number'], file=frame['file'], host_monotonic=stamp,
-                    frame_monotonic=stamps[i], relative_angle_deg=angles[i] if angle is None else angle,
+                    frame_monotonic=stamps[i], angle_3d_deg=angle,
+                    change_from_reference_deg=angle-reference if angle is not None else None,
                     feedback=[dict(id=a['id'], mm=a['position'], host_monotonic=a['last_seen']) for a in axes])
 
-    # A three-frame median suppresses isolated contour jumps; never bridge missing detections.
-    candidates = []
-    for i in range(start + 1, end):
-        window = angles[i-1:i+2]
-        if None not in window:
-            value = median(window)
-            candidates.append((abs(value), -abs(angles[i] - value), i, value))
-    peak = max(candidates, key=lambda item: (item[0], item[1]), default=None)
-    peak_trigger = (dict(status='detected', **trigger(peak[2], stamps[peak[2]], peak[3]))
-                    if peak and peak[0] > noise else dict(status='indistinguishable', frame=None))
+    peak = max((i for i in cycle if angles[i] is not None), key=angles.__getitem__, default=None)
+    peak_trigger = dict(status='no_valid_3d', frame=None)
+    if peak is not None:
+        distinct = angles[peak]-reference > noise
+        peak_trigger = dict(status='detected' if distinct else 'indistinguishable', **trigger(peak, stamps[peak]))
     hold = [angle for stamp, angle in zip(stamps, angles)
             if events['target_hold'] <= stamp < events['return'] and angle is not None]
     triggers = dict(T0=trigger(start, events['T0']), T1=peak_trigger, T2=trigger(end, events['T2']))
@@ -109,9 +110,9 @@ def export_videos(path, frames, angles, triggers):
                 cv2.circle(color, tuple(curve[0]), 4, (255, 100, 0), -1)
                 cv2.circle(color, tuple(curve[-1]), 4, (0, 0, 255), -1)
             stamp = frame['host_receive_monotonic'] - triggers['T0']['host_monotonic']
-            reading = '---' if angle is None else f'{angle:+.2f} deg'
+            reading = 'unavailable' if angle is None else f'{angle:.2f} deg'
             labels = ' '.join(name for name, file in markers.items() if file == frame['file'])
-            caption = f'2D projection: {reading}   {stamp:+.2f}s   {labels}'
+            caption = f'3D bend: {reading}   {stamp:+.2f}s   {labels}'
             cv2.rectangle(color, (0, 0), (width, 34), (21, 26, 32), -1)
             cv2.putText(color, caption, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, .52, (255, 255, 255), 1, cv2.LINE_AA)
             writers[2].write(color)

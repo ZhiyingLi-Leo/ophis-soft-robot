@@ -2,7 +2,6 @@
 import argparse
 import csv
 import json
-import math
 from pathlib import Path
 
 
@@ -16,9 +15,12 @@ def main():
             item=json.loads(line)
             if item['kind']!='frame':continue
             m=item['measurement'];stamp=item['host_receive_monotonic']
+            shape=m.get('shape_3d') or {}
             row=dict(frame=item['frame_number'],host_monotonic=stamp,file=item['file'],
                      contour_valid=m['valid'],projected_theta_deg=m['projected_theta_deg'],
                      surface_theta_deg=m['surface_theta_deg'],depth_fraction=m['depth_fraction'],
+                     shape_3d_valid=shape.get('valid'), angle_3d_deg=shape.get('angle_deg'),
+                     centerline_length_mm=shape.get('length_mm'), shape_3d_reason=shape.get('reason'),
                      background_separation_mm=m.get('background_separation_mm'))
             axes={a['id']:a for a in item.get('telemetry',{}).get('axes',[])}
             for i in (1,2,3):

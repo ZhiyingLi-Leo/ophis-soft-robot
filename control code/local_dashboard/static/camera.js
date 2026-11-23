@@ -1,8 +1,12 @@
+import { createCameraShape } from './camera-shape.js';
+
 const $=selector=>document.querySelector(selector);
 export function setupCamera(act, showProgress){
   let state=null,busy=false,lastFrame=null,imageUrl=null;
   let setup=false,applied=false,drawing=null,previewSettings=null,confirming=false,experimentRunning=false,axesReady=false;
   const image=$('#cpreview'), box=$('#cropbox');
+  const shapePanel=$('#cameraShapePanel');
+  let shapeView=null, webglFailed=false;
   const roiIds=['cx0','cy0','cx1','cy1'];
   const device=(operation,arguments_={})=>act('device',{device:'camera.d405',operation,arguments:arguments_});
   $('#cconnect').onclick=()=>device(state?.online||state?.status==='连接中'||state?.status==='等待首帧'?'disconnect':'connect',{serial:$('#cserial').value.trim()});
@@ -40,10 +44,10 @@ export function setupCamera(act, showProgress){
     if(!current)hint='接入 D405 并等待新鲜图像。';
     else if(!applied)hint='在图像上拖框，或输入边界后应用参数。';
     else if(!settingsMatch)hint='等待新识别区域的预览。';
-    else if(!Number.isFinite(state.measurement?.projected_signed_deg))hint='请调整区域和颜色参数，直到根部和尖端清晰。';
+    else if(!state.measurement?.shape_3d?.valid)hint=state.measurement?.shape_3d?.reason||'等待有效三维中心线。';
     else if(!axesReady)hint='请接入三根电缸，确认反馈有效且电缸静止。';
     else if(!(limit>=4&&limit<=48))hint='确认组合路径后，填写现场允许的总推进量上限。';
-    $('#pretestready').textContent=hint||'识别有效，请检查叠图后确认。';
+    $('#pretestready').textContent=hint||'三维测量有效，请检查中心线和夹角后确认。';
     $('#pretestconfirm').disabled=!!hint||confirming||experimentRunning||state.recording||!!drawing;
   }
   function imageBounds(){
@@ -110,9 +114,22 @@ export function setupCamera(act, showProgress){
     }catch{clearPreview();}finally{busy=false;}
   }
   const num=(v,d=1)=>Number.isFinite(v)?v.toFixed(d):'—';
+  function renderShape(s, fresh){
+    const cameraPage=document.body.dataset.page==='camera';
+    const running=s?.experiment?.status==='running'&&s.experiment.pretest;
+    const slot=cameraPage||!running?$('#cameraShapeSlot'):$('#pretestShapeSlot');
+    if(shapePanel.parentElement!==slot)slot.append(shapePanel);
+    const shape=fresh?s.camera.measurement?.shape_3d:null;
+    if(!shapeView&&!webglFailed&&(cameraPage||running)){
+      try {shapeView=createCameraShape($('#cameraShapeCanvas'));}
+      catch {webglFailed=true;$('#cameraShapeCanvas').hidden=true;}
+    }
+    $('#cameraShapeStatus').textContent=webglFailed?'三维视图需要浏览器 WebGL 支持':shape?.valid?'':(shape?.reason||'等待有效三维中心线');
+    if(cameraPage||running)shapeView?.update(shape,s?.camera.frame_number);
+  }
   function render(s){
     const c=state=s?.camera;
-    if(!c){clearPreview();$('#cstatus').textContent='服务离线';for(const id of ['cconnect','crecord','crecordstop','capply'])$('#'+id).disabled=true;renderPretest();return;}
+    if(!c){clearPreview();$('#cstatus').textContent='服务离线';for(const id of ['cconnect','crecord','crecordstop','capply'])$('#'+id).disabled=true;renderPretest();renderShape(null,false);return;}
     const running=['running','stopping'].includes(s.experiment?.status);
     experimentRunning=running;
     axesReady=s.axes.every(a=>a.online&&!a.error&&!a.moving&&a.age!==null&&a.age<1);
@@ -127,15 +144,15 @@ export function setupCamera(act, showProgress){
     const missing=Object.entries(c.dependencies).filter(([,v])=>!v).map(([k])=>k);$('#cdeps').textContent=missing.length?'缺少 '+missing.join('、'):'已就绪';
     $('#cerror').textContent=c.error||c.record_error||'';
     $('#cframes').textContent=String(c.processed_frames);$('#cage').textContent=num(c.frame_age,2)+' s';
-    $('#cprojection').textContent=fresh?num(c.measurement?.projected_theta_deg)+'°':'—';
-    $('#csurface').textContent=fresh?num(c.measurement?.surface_theta_deg)+'°':'—';
-    $('#cdepth').textContent=fresh?num((c.measurement?.depth_fraction??0)*100)+'%':'—';
-    $('#cquality').textContent=fresh?(c.measurement?.reason??'等待识别'):'等待新鲜图像';
+    const shape=fresh?c.measurement?.shape_3d:null;
+    $('#csurface').textContent=shape?.valid?num(shape.angle_deg)+'°':'—';
+    $('#cdepth').textContent=fresh?`${shape?.observed_indices?.length??0} / 21`:'—';
     $('#crecordstate').textContent=c.recording?'记录中 · '+c.recorded_frames+' 帧':'已停止 · '+c.recorded_frames+' 帧';
     $('#csession').textContent=c.session_path||'记录将在本机 data/ 下创建实验目录';
     $('#summarycamera').textContent=fresh?'D405 · 采集中':c.error?'D405 · 接入故障':'D405 · 未接入';
     if(!fresh)clearPreview();else preview(c);
     renderPretest();
+    renderShape(s,fresh);
   }
   return {render,beginPretest(){
     setup=true;applied=false;$('#pretestlimit').value='';
