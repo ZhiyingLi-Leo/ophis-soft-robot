@@ -23,7 +23,7 @@ def thin(mask):
     return image[1:-1,1:-1]*255
 
 
-def analyze(color, depth_mm, settings, *, deproject=None):
+def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconstruct):
     import cv2
     import numpy as np
     h,w=color.shape[:2]
@@ -107,5 +107,5 @@ def analyze(color, depth_mm, settings, *, deproject=None):
     result['background_separation_mm']=float(np.median(background)-np.median(valid)) if background.size and valid else None
     result['sample_depth_mm']=depths
     if deproject is not None:
-        result['shape_3d']=reconstruct(depth_mm,orange,mask,green & allowed,curve,deproject,settings)
+        result['shape_3d']=reconstruction(depth_mm,orange,mask,green & allowed,curve,deproject,settings)
     return result,overlay
