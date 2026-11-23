@@ -41,6 +41,49 @@ def axes_by_id(state):
     return [axes[i] for i in (1,2,3)]
 
 
+def positions_at_target(axes, targets, tolerance):
+    for axis, target in zip(axes,targets):
+        if not abs(axis['position']-target)<=tolerance:
+            return False
+        if axis['moving']:
+            # The driver can keep its motion bit set after settling a few counts from the goal.
+            half_count = axis['stroke']/4000 + 1e-9
+            if not (abs(axis['target']-target)<=half_count and abs(axis['command']-target)<=half_count):
+                return False
+    return True
+
+
+class ArrivalWindow:
+    """Require distinct encoder samples and at most three counts of travel per axis."""
+
+    def __init__(self, targets, tolerance, seconds=.6):
+        self.targets = targets
+        self.tolerance = tolerance
+        self.seconds = seconds
+        self.samples = deque()
+        self.last_seen = None
+
+    def update(self, axes):
+        stamps = tuple(a['last_seen'] for a in axes)
+        if not positions_at_target(axes,self.targets,self.tolerance) or min(stamps)<=0:
+            self.samples.clear()
+            self.last_seen = None
+            return False
+        if self.last_seen and any(s<previous or s-previous>self.seconds for s,previous in zip(stamps,self.last_seen)):
+            self.samples.clear()
+            self.last_seen = None
+        if not self.last_seen or all(s>previous for s,previous in zip(stamps,self.last_seen)):
+            self.last_seen = stamps
+            self.samples.append((min(stamps), tuple(a['position'] for a in axes)))
+        latest = self.samples[-1][0]
+        while len(self.samples)>3 and latest-self.samples[1][0]>=self.seconds:
+            self.samples.popleft()
+        if len(self.samples)<3 or latest-self.samples[0][0]<self.seconds:
+            return False
+        columns = zip(*(positions for _,positions in self.samples))
+        return all(max(values)-min(values)<=3*axis['stroke']/2000+1e-9 for axis,values in zip(axes,columns))
+
+
 def wait_stable(robot, target, timeout, window, angle_tolerance, position_tolerance, shape_tolerance=.5):
     recent=deque();deadline=time.monotonic()+timeout;last_frame=None
     while time.monotonic()<deadline:

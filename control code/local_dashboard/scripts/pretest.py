@@ -10,7 +10,7 @@ from statistics import mean, median, stdev
 
 from experiment_api import Robot
 from pretest_data import check_video_support, export_videos, frame_angle, read_capture, save_json, shape_angle, summarize
-from sampling import axes_by_id, require_camera
+from sampling import ArrivalWindow, axes_by_id, positions_at_target, require_camera
 
 POINTS = ((2, 0, 0), (1, 0, 0), (0, 2, 0), (0, 0, 2),
           (2, 1, 0), (0, 2, 1), (1, 0, 2), (1, 1, 1), (2, 1, 1))
@@ -57,8 +57,7 @@ class Pretest:
         return axes, camera, angle
 
     def at(self, axes, target):
-        return all(not a['moving'] and abs(a['position'] - q) <= POSITION_TOLERANCE
-                   for a, q in zip(axes, target))
+        return positions_at_target(axes,target,POSITION_TOLERANCE)
 
     def arm(self):
         if not self.at(self.feedback()[0], self.reference):
@@ -127,8 +126,9 @@ class Pretest:
 
     def wait_arrival(self, destination, target):
         deadline = time.monotonic() + 30
+        measured = ArrivalWindow(destination,POSITION_TOLERANCE)
         while time.monotonic() < deadline:
-            if self.at(self.observe(target)[0], destination):
+            if measured.update(self.observe(target)[0]):
                 return
             self.robot.wait(.08)
         raise RuntimeError('电缸到位超时')
@@ -137,9 +137,10 @@ class Pretest:
         deadline = time.monotonic() + 30
         window = deque()
         previous = None
+        measured = ArrivalWindow(self.reference,POSITION_TOLERANCE)
         while time.monotonic() < deadline:
             axes, camera, angle = self.observe(target)
-            if not self.at(axes, self.reference) or angle is None:
+            if not measured.update(axes) or angle is None:
                 window.clear()
             elif camera['frame_number'] != previous:
                 previous = camera['frame_number']

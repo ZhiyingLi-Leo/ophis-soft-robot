@@ -203,6 +203,26 @@ class VisionTests(unittest.TestCase):
         self.assertFalse(invalid['valid'])
         self.assertIsNone(invalid['angle_deg'])
 
+    def test_direction_window_keeps_raw_angle_and_clears_on_tracking_loss(self):
+        import math
+        from device_plugins.shape3d import BendDirectionHistory
+
+        tracker = BendDirectionHistory()
+        def shape(degrees):
+            radians = math.radians(degrees)
+            return dict(valid=True,angle_deg=degrees,shaft_axis={'direction':[1,0,0]},
+                        tip_tangent=[math.cos(radians),0,math.sin(radians)])
+        tracker.update(shape(30),1,{'roi':'A'})
+        tracker.update(shape(30),1.17,{'roi':'A'})
+        filtered = tracker.update(shape(65),1.34,{'roi':'A'})
+        self.assertAlmostEqual(filtered['angle_deg'],30)
+        self.assertEqual(filtered['raw_angle_deg'],65)
+        self.assertEqual(filtered['direction_frames'],3)
+        invalid = dict(valid=False,angle_deg=None)
+        self.assertEqual(tracker.update(invalid,1.51,{'roi':'A'}),invalid)
+        self.assertAlmostEqual(tracker.update(shape(65),1.68,{'roi':'A'})['angle_deg'],65)
+        self.assertEqual(tracker.update(shape(15),1.85,{'roi':'B'})['direction_frames'],1)
+
     def test_reconstruction_rejects_background_depth_inside_the_tip_mask(self):
         import numpy as np
         from device_plugins.vision import analyze

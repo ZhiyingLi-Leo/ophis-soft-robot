@@ -1,6 +1,48 @@
 """Reconstruct the flexible segment from aligned depth in camera millimetres."""
 
 import math
+from collections import deque
+
+
+def bend_angle(axis, tip):
+    import numpy as np
+
+    return math.degrees(math.atan2(float(np.linalg.norm(np.cross(axis,tip))), float(np.dot(axis,tip))))
+
+
+class BendDirectionHistory:
+    """Estimate current directions from a short, causal window of valid frames."""
+
+    def __init__(self):
+        self.recent = deque(maxlen=7)
+        self.settings = None
+
+    def update(self, shape, stamp, settings):
+        import numpy as np
+
+        if self.settings != settings or not shape.get('valid') or (self.recent and stamp <= self.recent[-1][0]):
+            self.recent.clear()
+            self.settings = settings
+        if not shape.get('valid'):
+            return shape
+        axis, tip = shape['shaft_axis']['direction'], shape['tip_tangent']
+        self.recent.append((stamp,axis,tip))
+        while stamp-self.recent[0][0] > .75:
+            self.recent.popleft()
+
+        def median_direction(index):
+            vector = np.median([row[index] for row in self.recent],axis=0)
+            norm = np.linalg.norm(vector)
+            return (vector/norm).tolist() if norm > 1e-6 else self.recent[-1][index]
+
+        if len(self.recent) >= 3:
+            filtered_axis, filtered_tip = median_direction(1), median_direction(2)
+        else:
+            filtered_axis, filtered_tip = axis, tip
+        return dict(shape, angle_deg=bend_angle(filtered_axis,filtered_tip), raw_angle_deg=shape['angle_deg'],
+                    shaft_axis=dict(shape['shaft_axis'], direction=filtered_axis), tip_tangent=filtered_tip,
+                    raw_shaft_direction=axis, raw_tip_tangent=tip,
+                    direction_frames=len(self.recent), direction_span_s=stamp-self.recent[0][0])
 
 
 def depth_at(depth, mask, green, pixel):
@@ -61,6 +103,33 @@ def fit_direction(points):
     return axis if axis @ (points[-1]-points[0]) > 0 else -axis
 
 
+def fit_distal_tangent(center, distances, observed):
+    import numpy as np
+
+    length = distances[-1]
+    window = min(20., .68*length)
+    # Use a wider fit while evaluating the tangent near the same distal station.
+    indices = observed[(distances[observed] >= length-window) & (observed < len(center)-1)]
+    if len(indices) < 6 or np.ptp(distances[indices]) < .5*window:
+        return None
+    station = .85*length
+    s = (distances[indices]-station)/window
+    if s[-1] < 0:
+        return None
+    design = np.column_stack((np.ones(len(s)),s,s*s))
+    points = center[indices]
+    weights = np.ones(len(s))
+    for _ in range(3):
+        fit = np.sqrt(weights)[:,None]
+        terms = np.linalg.lstsq(design*fit,points*fit,rcond=None)[0]
+        residual = np.linalg.norm(design@terms-points,axis=1)
+        scale = max(.15,1.6*float(np.median(residual)))
+        weights = np.minimum(1,scale/np.maximum(residual,1e-6))
+    tip = terms[1]
+    norm = np.linalg.norm(tip)
+    return tip/norm if norm > 1e-6 and tip@(points[-1]-points[0]) > 0 else None
+
+
 def fit_shape(surface, shaft, diameter_mm, length_mm):
     import numpy as np
 
@@ -97,17 +166,18 @@ def fit_shape(surface, shaft, diameter_mm, length_mm):
     if np.any(radial_norm < .2):
         return dict(shape, reason='局部切线接近视线，截面中心不可可靠恢复')
     center = path + (diameter_mm/2)*radial/radial_norm[:,None]
-    arc = float(np.linalg.norm(np.diff(center,axis=0),axis=1).sum())
+    distances = np.r_[0,np.cumsum(np.linalg.norm(np.diff(center,axis=0),axis=1))]
+    arc = float(distances[-1])
     if not .5*length_mm <= arc <= 1.7*length_mm:
         return dict(shape, reason='重建的柔性段长度与实物尺寸不符')
 
     # Fit the distal tangent from 3D neighbours and require actual distal observations.
     if np.count_nonzero((observed >= len(surface)-6) & (observed < len(surface)-1)) < 3:
         return dict(shape, reason='尖端切线附近实测点不足')
-    tip = fit_direction(center[-6:-1])
+    tip = fit_distal_tangent(center,distances,observed)
     if tip is None:
         return dict(shape, reason='尖端的三维切线无法可靠拟合')
-    angle = math.degrees(math.atan2(float(np.linalg.norm(np.cross(direction,tip))), float(direction @ tip)))
+    angle = bend_angle(direction,tip)
     return dict(shape, valid=True, reason='三维中心线估计有效', angle_deg=angle,
                 centerline_camera_mm=center.tolist(), length_mm=arc,
                 shaft_axis={'point_camera_mm':shaft[-1].tolist(), 'direction':direction.tolist()},

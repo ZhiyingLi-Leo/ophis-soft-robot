@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pretest_data import export_videos, summarize
+from sampling import ArrivalWindow
 from scripts.pretest import Pretest
 from server import Engine
 
@@ -22,6 +23,21 @@ def example_capture():
 
 
 class PretestTests(unittest.TestCase):
+    def test_arrival_uses_distinct_stable_feedback_even_if_motion_flag_stays_set(self):
+        window=ArrivalWindow([1],.05)
+        axis=dict(position=1.016, target=1., command=1., moving=True, stroke=16.)
+        def observe(stamp, **changes):
+            return window.update([dict(axis,last_seen=stamp,**changes)])
+        self.assertFalse(observe(1))
+        self.assertFalse(observe(1))
+        self.assertFalse(observe(1.31))
+        self.assertTrue(observe(1.62))
+        self.assertFalse(window.update([dict(axis,last_seen=1.8,command=.95)]))
+        self.assertFalse(observe(2.1))
+        self.assertFalse(observe(2.42))
+        self.assertFalse(window.update([dict(axis,last_seen=2.74,position=.968)]))
+        self.assertFalse(observe(4))
+
     def test_preview_confirmation_required_and_pause_is_atomic(self):
         engine = Engine(CONFIG, testing=True)
         self.addCleanup(engine.close)

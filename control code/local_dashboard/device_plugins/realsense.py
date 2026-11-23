@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .vision import analyze
+from .shape3d import BendDirectionHistory
 
 
 def dependencies():
@@ -34,6 +35,7 @@ class D405Device:
         self.telemetry=telemetry
         self.halt=threading.Event();self.thread=None
         self.jpeg=None;self.recording=None
+        self.bend_history=BendDirectionHistory()
         self.settings=dict(roi=[0.,0.,1.,1.],white_min=85,white_sat=100,length_mm=30.,diameter_mm=6.)
         self.status=dict(online=False,name='RealSense D405',status='未接入',error='',last_frame_time=None,
                          frame_number=None,frame_age=None,measurement=None,measurement_settings=None,calibration=None,
@@ -90,6 +92,7 @@ class D405Device:
         with self.lock:
             if self.thread and self.thread.is_alive():raise ValueError('相机正在连接或运行，请等待或先断开')
             self.halt=threading.Event();self.jpeg=None
+            self.bend_history=BendDirectionHistory()
             self.status.update(status='连接中',error='',measurement=None,last_frame_time=None)
             self.thread=threading.Thread(target=self._capture,args=(serial,),daemon=True)
             self.thread.start()
@@ -122,7 +125,7 @@ class D405Device:
             metadata=dict(label=label,created=datetime.now().astimezone().isoformat(),
                           settings=self.settings,calibration=self.status['calibration'],
                           depth_note='native_depth uses depth_scale_m; aligned_depth is unfilled and aligned to color',
-                          shape_note='shape_3d is a nominal-radius centreline estimate in camera mm; validate with known angles',
+                          shape_note='shape_3d stores camera-mm centreline and raw/short-window bend directions; validate with known angles',
                           target_record_hz=5,timing_note='host receive time is not exposure time; per-axis feedback timestamps retained')
             (path/'metadata.json').write_text(json.dumps(metadata,ensure_ascii=False,indent=2))
             index=(path/'frames.jsonl').open('w')
@@ -227,6 +230,7 @@ class D405Device:
             return [coordinate*1000 for coordinate in rs.rs2_deproject_pixel_to_point(intr,pixel,depth_mm/1000)]
 
         measured,overlay=analyze(color,aligned_array.astype(float)*scale*1000,settings,deproject=deproject)
+        measured['shape_3d']=self.bend_history.update(measured['shape_3d'],info['host_receive_monotonic'],settings)
         points=[]
         for pixel,z in zip(measured['curve_px'],measured.get('sample_depth_mm',[])):
             points.append(deproject(pixel,z) if z is not None else None)
