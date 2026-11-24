@@ -56,10 +56,10 @@ def depth_at(depth, mask, green, pixel):
     if len(values) < 3:
         return None
     z = float(np.median(values))
-    # The green backdrop lies behind the catheter in the measurement setup.
+    # Depth on the translucent tube can be within a few millimetres of the backdrop.
     nearby = np.s_[max(0,y-24):y+25, max(0,x-24):x+25]
     background = depth[nearby][(green[nearby] > 0) & (depth[nearby] > 0)]
-    if len(background) >= 10 and z >= float(np.median(background)) - 1:
+    if len(background) >= 10 and z >= float(np.median(background)) - 5:
         return None
     return z
 
@@ -136,7 +136,7 @@ def fit_shape(surface, shaft, diameter_mm, length_mm):
     observed = np.array([i for i, p in enumerate(surface) if p is not None])
     shape = dict(valid=False, angle_deg=None, centerline_camera_mm=[], observed_indices=observed.tolist(),
                  shaft_axis=None, tip_tangent=None, reason='三维重建不可用')
-    if len(surface) < 7 or len(observed) < 7 or observed[0] != 0 or observed[-1] != len(surface)-1 or np.diff(observed).max() > 3:
+    if len(surface) < 7 or len(observed) < 7 or observed[0] != 0:
         return dict(shape, reason='柔性段端点或连续区间缺少可靠深度')
     if len(shaft) < 5:
         return dict(shape, reason='橙色近端的可靠深度不足')
@@ -145,12 +145,24 @@ def fit_shape(surface, shaft, diameter_mm, length_mm):
     observed_points = np.asarray([surface[i] for i in observed], dtype=float)
     if not np.isfinite(shaft).all() or not np.isfinite(observed_points).all():
         return dict(shape, reason='反投影返回无效三维点')
+
+    # A lone far-depth return can survive the backdrop check at the distal edge.
+    last_valid_min = len(surface)-4
+    if (observed[-2] >= last_valid_min and np.all(np.diff(observed[-4:-1]) == 1)
+            and observed_points[-1, 2] - observed_points[-2, 2] > diameter_mm*(observed[-1]-observed[-2])):
+        observed = observed[:-1]
+        observed_points = observed_points[:-1]
+        shape['observed_indices'] = observed.tolist()
+    if len(observed) < 7 or observed[-1] < last_valid_min or np.diff(observed).max() > 3:
+        return dict(shape, reason='柔性段端点或连续区间缺少可靠深度')
+
     direction = fit_direction(shaft)
     if direction is None:
         return dict(shape, reason='橙色近端的三维轴线无法可靠拟合')
     if np.max(np.linalg.norm(np.diff(observed_points,axis=0),axis=1)/np.diff(observed)) > diameter_mm:
         return dict(shape, reason='柔性段深度出现跳变')
-    positions = np.arange(len(surface))
+    # Interpolate interior gaps and stop at the final accepted depth station.
+    positions = np.arange(observed[-1]+1)
     path = np.column_stack([np.interp(positions, observed, values) for values in observed_points.T])
     path[1:-1] = (path[:-2]+2*path[1:-1]+path[2:])/4
 
@@ -172,7 +184,7 @@ def fit_shape(surface, shaft, diameter_mm, length_mm):
         return dict(shape, reason='重建的柔性段长度与实物尺寸不符')
 
     # Fit the distal tangent from 3D neighbours and require actual distal observations.
-    if np.count_nonzero((observed >= len(surface)-6) & (observed < len(surface)-1)) < 3:
+    if np.count_nonzero((observed >= len(path)-6) & (observed < len(path)-1)) < 3:
         return dict(shape, reason='尖端切线附近实测点不足')
     tip = fit_distal_tangent(center,distances,observed)
     if tip is None:

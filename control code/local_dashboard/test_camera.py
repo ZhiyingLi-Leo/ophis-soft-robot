@@ -321,8 +321,12 @@ class VisionTests(unittest.TestCase):
             self.assertEqual(camera.snapshot()['settings']['roi'], original_roi)
             result = camera.command('auto_locate', {})
             self.assertEqual(result['settings'], camera.snapshot()['settings'])
-            self.assertGreater(result['settings']['roi'][0], .25)
-            self.assertLess(result['settings']['roi'][3], .8)
+            bounds = analyze(image, None, full)[0]['catheter_bounds_px']
+            x0, y0, x1, y1 = result['settings']['roi']
+            self.assertLessEqual(x0, bounds[0]/320-.20)
+            self.assertEqual(y0, 0)
+            self.assertGreaterEqual(x1, bounds[2]/320+.20)
+            self.assertGreaterEqual(y1, bounds[3]/240+.25)
             assert_catheter(analyze(image, None, result['settings'])[0])
             with patch('device_plugins.realsense.time.monotonic', return_value=info['host_receive_monotonic']+2):
                 with self.assertRaisesRegex(ValueError, '新鲜图像'):
@@ -357,6 +361,27 @@ class VisionTests(unittest.TestCase):
         image=self.image();image[:,0:71]=(20,150,20)
         self.assertFalse(analyze(image,None,settings)[0]['valid'])
 
+    def test_d405_projected_tip_stays_centered_with_small_cap_hooks(self):
+        import cv2
+        import numpy as np
+        from device_plugins.vision import analyze
+
+        mat = (120, 105, 70)
+        image = np.full((240, 320, 3), mat, np.uint8)
+        cv2.line(image, (150, 35), (150, 83), (0, 130, 240), 6)
+        cv2.line(image, (150, 84), (150, 140), (220, 220, 220), 6)
+        settings = dict(roi=[0,0,1,1], white_min=85, white_sat=100)
+        for hook_length in (0, 1, 2):
+            with self.subTest(hook_length=hook_length):
+                frame = image.copy()
+                if hook_length:
+                    frame[141:145,150:153] = mat
+                    frame[140:141+hook_length,147:149] = 220
+                result, _ = analyze(frame, None, settings)
+                self.assertTrue(result['valid'], result['reason'])
+                np.testing.assert_allclose(result['curve_px'][-1], [150, 141], atol=1)
+                self.assertAlmostEqual(result['projected_theta_deg'], 0, delta=2)
+
     def test_depth_and_background_separation(self):
         import numpy as np
         from device_plugins.vision import analyze
@@ -383,7 +408,7 @@ class VisionTests(unittest.TestCase):
         self.assertAlmostEqual(shape['angle_deg'],59.5,delta=2)
         np.testing.assert_allclose(shape['centerline_camera_mm'],center,atol=.5)
         self.assertNotIn(8,shape['observed_indices'])
-        surface[-1] = None
+        surface[8:12] = [None]*4
         invalid = fit_shape(surface,shaft,6,30)
         self.assertFalse(invalid['valid'])
         self.assertIsNone(invalid['angle_deg'])
@@ -408,22 +433,64 @@ class VisionTests(unittest.TestCase):
         self.assertAlmostEqual(tracker.update(shape(65),1.68,{'roi':'A'})['angle_deg'],65)
         self.assertEqual(tracker.update(shape(15),1.85,{'roi':'B'})['direction_frames'],1)
 
-    def test_reconstruction_rejects_background_depth_inside_the_tip_mask(self):
+    def test_teal_background_and_translucent_tip_depth(self):
+        import cv2
         import numpy as np
         from device_plugins.vision import analyze
 
         settings = dict(roi=[0,0,1,1],white_min=85,white_sat=100,length_mm=30,diameter_mm=6)
-        depth = np.full((240,320),200.)
-        depth[105:136,20:71] = 150.
-        depth[110:131,71:251] = 150.
-        deproject = lambda pixel,z:[(pixel[0]-160)*z/1000, (pixel[1]-120)*z/1000, z]
-        result,_ = analyze(self.image(),depth,settings,deproject=deproject)
-        self.assertTrue(result['shape_3d']['valid'],result['shape_3d']['reason'])
-        self.assertAlmostEqual(result['shape_3d']['angle_deg'],0,delta=1)
-        depth[110:131,232:251] = 200.
-        result,_ = analyze(self.image(),depth,settings,deproject=deproject)
-        self.assertEqual(result['depth_fraction'],1)
-        self.assertFalse(result['shape_3d']['valid'])
+        image = self.image()
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        hsv[hsv[:, :, 0] == 60, 0] = 106
+        image = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        depth = np.full((240,320),278.)
+        depth[105:136,20:71] = 210.
+        depth[110:131,71:251] = 210.
+        deproject = lambda pixel,z:[(pixel[0]-160)*z/1260, (pixel[1]-120)*z/1260, z]
+        clean, _ = analyze(image,depth,settings,deproject=deproject)
+        self.assertAlmostEqual(clean['background_separation_mm'], 68)
+        stations = np.asarray(clean['curve_px'])[:, 0]
+        for count, bleed in ((0, 276), (1, 277), (2, 276), (3, 277), (4, 277), (5, 276)):
+            with self.subTest(count=count, bleed=bleed):
+                frame = depth.copy()
+                if count:
+                    start = round((stations[-count-1] + stations[-count])/2)
+                    frame[110:131,start:251] = bleed
+                result, _ = analyze(image,frame,settings,deproject=deproject)
+                shape = result['shape_3d']
+                self.assertEqual(result['depth_fraction'], 1)
+                self.assertEqual(shape['observed_indices'], list(range(21-count)))
+                if count <= 3:
+                    self.assertTrue(shape['valid'], shape['reason'])
+                    self.assertAlmostEqual(shape['angle_deg'], 0, delta=1)
+                    self.assertEqual(len(shape['centerline_camera_mm']), 21-count)
+                else:
+                    self.assertFalse(shape['valid'])
+                    self.assertIsNone(shape['angle_deg'])
+
+    def test_only_isolated_distal_depth_jump_is_recoverable(self):
+        import numpy as np
+        from device_plugins.shape3d import fit_shape
+
+        surface = [[x,0,210] for x in np.linspace(0,30,21)]
+        shaft = [[x,0,210] for x in np.linspace(-15,0,9)]
+        edge_bleed = surface[:18] + [None, None, [30,0,277.15]]
+        shape = fit_shape(edge_bleed,shaft,6,30)
+        self.assertTrue(shape['valid'], shape['reason'])
+        self.assertEqual(shape['observed_indices'], list(range(18)))
+        self.assertAlmostEqual(shape['angle_deg'], 0, delta=1)
+
+        for middle in (surface[:], edge_bleed[:]):
+            middle[10] = [15,0,277.15]
+            shape = fit_shape(middle,shaft,6,30)
+            self.assertFalse(shape['valid'])
+            self.assertEqual(shape['reason'], '柔性段深度出现跳变')
+
+        for index in (15, 17, 18):
+            surface[index] = None
+        shape = fit_shape(surface,shaft,6,30)
+        self.assertFalse(shape['valid'])
+        self.assertEqual(shape['reason'], '尖端切线附近实测点不足')
 
     def test_capture_driver_with_sdk_double_saves_timestamps_and_stops(self):
         import numpy as np

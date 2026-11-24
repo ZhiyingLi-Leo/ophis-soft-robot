@@ -205,17 +205,30 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
     while tip is not None:path.append(tip);tip=parent[tip]
     path=np.array(path[::-1],dtype=float)
     if len(path)<10:return result,overlay
-    def extend(endpoint,direction):
+    def extend(endpoint,direction,*,supported=False):
         norm=np.linalg.norm(direction)
         if norm<1e-9:return endpoint
         direction=direction/norm;last=endpoint.copy()
+        normal = np.array([-direction[1], direction[0]])
         for step in range(1,max(h,w)):
             q=endpoint+direction*step;x,y=np.rint(q).astype(int)
             if not (0<=x<w and 0<=y<h and mask[y,x]):break
+            if supported and not all(0 <= px < w and 0 <= py < h and mask[py, px]
+                                     for px, py in np.rint([q-normal, q+normal]).astype(int)):
+                break
             last=q
         return last
+    if not side_view:
+        # Retrace the rounded cap along the local centerline, avoiding tiny skeleton hooks.
+        tube_width = len(tip_pixels) / np.linalg.norm(np.diff(path,axis=0),axis=1).sum()
+        cap_steps = min(len(path)-6, max(2, math.ceil(tube_width/2)))
+        path = path[:-cap_steps]
+        tip_direction = _end_tangent(path[-6:], tip_pixels, tube_width)
+        tip = extend(path[-1], tip_direction, supported=True)
+    else:
+        tip = extend(path[-1],path[-1]-path[max(0,len(path)-5)])
     path=np.vstack([extend(path[0],path[0]-path[min(4,len(path)-1)]),path,
-                    extend(path[-1],path[-1]-path[max(0,len(path)-5)])])
+                    tip])
     lengths=np.r_[0,np.cumsum(np.linalg.norm(np.diff(path,axis=0),axis=1))]
     query=np.linspace(0,lengths[-1],21)
     curve=np.column_stack([np.interp(query,lengths,path[:,j]) for j in (0,1)])
@@ -238,8 +251,9 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
     if depth_mm is None:
         result['catheter_bounds_px'] = [*extent.min(axis=0).tolist(), *(extent.max(axis=0)+1).tolist()]
         return result,overlay
-    green=np.zeros((h,w),np.uint8)
-    green[y0:y1,x0:x1]=cv2.inRange(hsv,np.array([32,55,30]),np.array([95,255,255]))
+    backdrop = np.zeros((h,w),np.uint8)
+    backdrop[y0:y1,x0:x1] = cv2.inRange(hsv,(32,55,30),(115,255,255))
+    backdrop[(orange > 0) | (mask > 0)] = 0
     depths=[]
     for x,y in curve.astype(int):
         window=depth_mm[max(0,y-1):min(h,y+2),max(0,x-1):min(w,x+2)]
@@ -247,12 +261,12 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
         valid=window[(window>0)&selected]
         depths.append(float(np.median(valid)) if valid.size else None)
     result['depth_fraction']=sum(v is not None for v in depths)/len(depths)
-    background=depth_mm[(green>0)&(depth_mm>0)]
+    background=depth_mm[(backdrop>0)&(depth_mm>0)]
     valid=[v for v in depths if v is not None]
     result['background_separation_mm']=float(np.median(background)-np.median(valid)) if background.size and valid else None
     result['sample_depth_mm']=depths
     if deproject is not None:
-        result['shape_3d']=reconstruction(depth_mm,orange,mask,green,curve,deproject,settings)
+        result['shape_3d']=reconstruction(depth_mm,orange,mask,backdrop,curve,deproject,settings)
     return result,overlay
 
 
@@ -297,12 +311,13 @@ def locate_roi(color, settings, *, side_view=False):
     x0, y0, x1, y1 = bounds
     span = max(x1-x0, y1-y0)
     # Leave room for motion in both directions, including a nearly straight reference.
-    if not side_view and y1-y0 > x1-x0:
-        pad_x = max(.15, .85*span/width)
-        pad_y = max(.06, .4*span/height)
-    else:
+    if side_view:
         pad_x = max(.06, .4*span/width)
         pad_y = max(.15, .85*span/height)
+    else:
+        vertical = y1-y0 > x1-x0
+        pad_x = max(.20, (.85 if vertical else .4)*span/width)
+        pad_y = max(.25, (.4 if vertical else .85)*span/height)
     return [max(0., x0/width-pad_x), max(0., y0/height-pad_y),
             min(1., x1/width+pad_x), min(1., y1/height+pad_y)]
 

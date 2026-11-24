@@ -87,10 +87,13 @@ def camera(calibration):
         original = fit(z)
         if not original['valid']:
             return original
+        # Keep the same rejected depth samples when smoothing the accepted reconstruction.
+        z[~np.isin(np.arange(len(z)), original['observed_indices'])] = np.nan
         shape = fit(smooth_depth(curve, z, intr))
         if shape['valid']:
-            tangent = shape3d.fit_distal_tangent(np.asarray(shape['centerline_camera_mm']),
-                                                arc(original['centerline_camera_mm']), np.asarray(shape['observed_indices']))
+            center = np.asarray(shape['centerline_camera_mm'])
+            distances = arc(original['centerline_camera_mm'])[:len(center)]
+            tangent = shape3d.fit_distal_tangent(center, distances, np.asarray(shape['observed_indices']))
             if tangent is None:
                 return dict(valid=False, reason='末端切线拟合失败')
             shape.update(tip_tangent=tangent.tolist(), angle_deg=shape3d.bend_angle(shape['shaft_axis']['direction'], tangent))
@@ -153,9 +156,12 @@ def analyze_round(job):
     cycle = [r for r in rows if r['valid'] and 0 <= r['t_from_T0_s'] <= times[-1]-times[1]]
     peak = max(cycle, key=lambda r:r['angle_deg'], default=None)
     actual = [r['actual_mm'][axis-1] for r in rows if r['phase']=='hold' and r['telemetry_valid']]
+    # Compare the physical tip only in frames with an observation at the final station.
+    ref_tips, hold_tips = ([r['centerline_camera_mm'][-1] for r in samples if len(r['centerline_camera_mm']) == 21]
+                          for samples in (ref, hold))
     tip_delta = [None]*3
-    if ref and hold:
-        tip_delta = (mid(hold,'centerline_camera_mm')[-1]-mid(ref,'centerline_camera_mm')[-1]).tolist()
+    if ref_tips and hold_tips:
+        tip_delta = (np.median(hold_tips,axis=0)-np.median(ref_tips,axis=0)).tolist()
     return dict(axis=axis, target_mm=target, repeat=info['repeat'], source=str(path), frames=len(rows),
                 reference_valid=len(ref), hold_valid=len(hold), valid=sum(r['valid'] for r in rows),
                 reference_deg=baseline, hold_deg=float(mid(hold,'angle_deg')) if hold else None,
