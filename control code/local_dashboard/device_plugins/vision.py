@@ -136,12 +136,30 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
 
 
 def analyze_rgb(color, settings):
-    measured, overlay = analyze(color, None, settings)
+    import cv2
+    import numpy as np
+
+    height, width = color.shape[:2]
+    working = color
+    if max(height, width) > 640:
+        scale = 640 / max(height, width)
+        size = (max(1, round(width*scale)), max(1, round(height*scale)))
+        working = cv2.resize(color, size, interpolation=cv2.INTER_AREA)
+    measured, overlay = analyze(working, None, settings)
     angle = measured['projected_signed_deg']
     result = dict(valid=angle is not None, angle_deg=angle, curve_px=measured['curve_px'],
                   reason='' if angle is not None else measured['reason'])
     if 'catheter_bounds_px' in measured:
         result['catheter_bounds_px'] = measured['catheter_bounds_px']
+    if working is not color:
+        pixel_scale = np.array([width / working.shape[1], height / working.shape[0]])
+        if result['curve_px']:
+            # Resize maps pixel centers. Bounding boxes below use pixel edges.
+            result['curve_px'] = ((np.asarray(result['curve_px'])+.5)*pixel_scale-.5).tolist()
+        if 'catheter_bounds_px' in result:
+            bounds = np.asarray(result['catheter_bounds_px']).reshape(2, 2)*pixel_scale
+            result['catheter_bounds_px'] = [*np.floor(bounds[0]).astype(int).tolist(),
+                                            *np.ceil(bounds[1]).astype(int).tolist()]
     return result, overlay
 
 

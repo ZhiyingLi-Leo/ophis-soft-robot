@@ -19,6 +19,8 @@ HELPER = (Path(__file__).resolve().parents[1] / '.venv' / 'OPHIS Side View.app' 
           'Contents' / 'MacOS' / 'ophis-uvc-capture')
 RECORD_HZ = 5
 MIN_DISK_BYTES = 512 * 1024**2
+MAX_FRAME_AGE = 1
+FRAME_TIMEOUT = 2
 
 
 def _helper():
@@ -39,21 +41,22 @@ def _device_list():
 
 
 def _packets(pipe, halt):
-    """Read JSON headers and packed BGRA with a deadline for each frame."""
+    """Drain complete packets and yield only fresh, ordered frames."""
+    import cv2
     import numpy as np
 
     fd = pipe.fileno()
     buffer = bytearray()
-    timeout = 90  # The first explicit connection can show a macOS permission dialog.
+    deadline = time.monotonic() + 90  # Allow for the macOS camera permission dialog.
+    previous_stamp, previous_number = -math.inf, -math.inf
     while not halt.is_set():
-        deadline = time.monotonic() + timeout
-
         def more():
             if halt.is_set():
                 raise EOFError()
-            if not select.select([fd], [], [], min(.2, max(0, deadline-time.monotonic())))[0]:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError('侧视相机等待图像超时')
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('侧视相机等待图像超时')
+            if not select.select([fd], [], [], min(.2, remaining))[0]:
                 return
             chunk = os.read(fd, 65536)
             if not chunk:
@@ -75,10 +78,25 @@ def _packets(pipe, halt):
                 raise RuntimeError('侧视帧尺寸无效')
             while len(buffer) < count:
                 more()
-            color = np.frombuffer(bytes(buffer[:count]), dtype=np.uint8).reshape(height, width, 4)
+            now = time.monotonic()
+            stamp, number, fps = (info.get(k) for k in ('host_receive_monotonic', 'frame_number', 'fps'))
+            if (type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp > now+.2 or
+                    type(fps) not in (int, float) or not math.isfinite(fps) or fps < 0 or type(number) is not int):
+                raise RuntimeError('侧视相机帧时间或格式无效')
+            if stamp <= previous_stamp or number <= previous_number:
+                raise RuntimeError('侧视帧序号或时间停止更新')
+            if now >= deadline:
+                raise RuntimeError('侧视相机等待图像超时')
+            if previous_number == -math.inf:
+                deadline = now + FRAME_TIMEOUT
+            previous_stamp, previous_number = stamp, number
+            if now-stamp > MAX_FRAME_AGE:
+                del buffer[:count]
+                continue
+            deadline = now + FRAME_TIMEOUT
+            pixels = np.frombuffer(buffer[:count], dtype=np.uint8).reshape(height, width, 4)
             del buffer[:count]
-            yield info, color[:, :, :3].copy()
-            timeout = 2
+            yield info, cv2.cvtColor(pixels, cv2.COLOR_BGRA2BGR)
         except EOFError:
             if halt.is_set():
                 return
@@ -227,6 +245,8 @@ class SideViewDevice:
     def _capture(self, device_id):
         process = None
         try:
+            import cv2  # Load OpenCV before the helper can start writing frames.
+
             device = next((item for item in self.discover() if item['id'] == device_id), None)
             if device is None:
                 raise RuntimeError('所选侧视摄像头已离线，请刷新设备列表')
@@ -239,8 +259,7 @@ class SideViewDevice:
                     self.process = process
                     self.status.update(name=device['name'], status='等待侧视首帧')
                 try:
-                    for info, color in _packets(process.stdout, self.halt):
-                        self._publish(info, color)
+                    self._stream(process, cv2)
                 except Exception as error:
                     errors.seek(0)
                     message = errors.read(8192).decode(errors='replace').strip()
@@ -260,18 +279,53 @@ class SideViewDevice:
                 self.status.update(online=False, measurement=None)
                 self.color = self.jpeg = None
 
-    def _publish(self, info, color):
-        import cv2
+    def _stream(self, process, cv2):
+        available = threading.Condition()
+        finished = threading.Event()
+        latest = None
+        processing_error = None
+
+        def process_latest():
+            nonlocal latest, processing_error
+            try:
+                while True:
+                    with available:
+                        available.wait_for(lambda: latest is not None or finished.is_set())
+                        if finished.is_set():
+                            return
+                        info, color = latest
+                        latest = None
+                    if time.monotonic() - info['host_receive_monotonic'] <= MAX_FRAME_AGE:
+                        self._publish(info, color, cv2=cv2, finished=finished)
+            except Exception as error:
+                processing_error = error
+                process.terminate()  # Wake the pipe reader so it can report the processing error.
+
+        worker = threading.Thread(target=process_latest, daemon=True)
+        worker.start()
+        try:
+            for frame in _packets(process.stdout, self.halt):
+                with available:
+                    latest = frame
+                    available.notify()
+        except Exception:
+            if processing_error is not None:
+                raise processing_error
+            raise
+        finally:
+            with self.lock:
+                finished.set()
+            with available:
+                available.notify()
+            worker.join(timeout=.2)
+
+    def _publish(self, info, color, *, cv2=None, finished=None):
+        if cv2 is None:
+            import cv2
 
         stamp, number = info['host_receive_monotonic'], info['frame_number']
         fps = info['fps']
-        if (not math.isfinite(stamp) or not math.isfinite(fps) or fps < 0 or type(number) is not int or
-                not -.05 <= time.monotonic()-stamp <= 1):
-            raise RuntimeError('侧视相机帧时间或格式无效')
         with self.lock:
-            previous = self.status['last_frame_time']
-            if previous is not None and (stamp <= previous or number <= self.status['frame_number']):
-                raise RuntimeError('侧视帧序号或时间停止更新')
             settings = self.settings
             rec = self.recording
         feedback = self.telemetry() if rec else None
@@ -280,7 +334,8 @@ class SideViewDevice:
         if not ok:
             raise RuntimeError('侧视预览编码失败')
         with self.lock:
-            if self.halt.is_set():
+            if (self.halt.is_set() or (finished is not None and finished.is_set()) or
+                    time.monotonic()-stamp > MAX_FRAME_AGE):
                 return
             height, width = color.shape[:2]
             stream_format = dict(width=width, height=height, fps=fps or None)

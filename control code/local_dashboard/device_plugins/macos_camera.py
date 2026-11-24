@@ -1,20 +1,45 @@
-"""Read frames from the manually authorized D405 capture session on macOS."""
+"""Connect to a privileged D405 capture helper on macOS."""
 import json
 import os
 import socket
 import time
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+LOCAL_HELPER = ROOT / '.venv' / 'bin' / 'ophis-d405-capture'
+
+
+def helper_path():
+    return Path(os.environ.get('OPHIS_D405_HELPER', LOCAL_HELPER)).resolve()
+
 
 def endpoint():
     return Path('/tmp') / f'ophis-d405-{os.getuid()}' / 'frames'
 
 
-def receive(camera, serial, rs):
-    import numpy as np
-    with socket.socket(socket.AF_UNIX) as conn:
-        conn.settimeout(5)
+def connect_bridge():
+    conn = socket.socket(socket.AF_UNIX)
+    try:
+        conn.settimeout(.25)
         conn.connect(str(endpoint()))
+        conn.settimeout(5)
+        return conn
+    except OSError:
+        conn.close()
+        raise
+
+
+def bridge_listening():
+    try:
+        with connect_bridge():
+            return True
+    except OSError:
+        return False
+
+
+def receive(camera, serial, rs, *, conn=None):
+    import numpy as np
+    with conn if conn is not None else connect_bridge() as conn:
         with conn.makefile('rb') as stream:
             calibration = json.loads(stream.readline(8192))
             if serial and calibration['serial'] != serial:

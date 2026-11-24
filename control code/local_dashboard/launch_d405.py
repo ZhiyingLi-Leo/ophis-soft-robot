@@ -3,7 +3,6 @@
 import argparse
 import json
 import os
-import socket
 import subprocess
 import sys
 import tempfile
@@ -11,7 +10,7 @@ import time
 from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
-from device_plugins.macos_camera import endpoint
+from device_plugins.macos_camera import LOCAL_HELPER, bridge_listening, helper_path
 
 ROOT = Path(__file__).resolve().parent
 HTTP = build_opener(ProxyHandler({}))
@@ -27,12 +26,6 @@ def workbench_state(url):
     except (OSError, ValueError):
         pass
     return None
-
-
-def bridge_listening():
-    with socket.socket(socket.AF_UNIX) as client:
-        client.settimeout(.25)
-        return client.connect_ex(str(endpoint())) == 0
 
 
 def open_workbench(port, url):
@@ -60,11 +53,11 @@ def launch(port, serial):
         open_workbench(port, url)
         return 0
 
-    env = ROOT / '.venv'
-    helper = env / 'bin' / 'ophis-d405-capture'
-    source = ROOT / 'device_plugins' / 'd405_capture.cpp'
-    subprocess.run(['/usr/bin/clang++', '-std=c++17', '-O2', f'-I{env / "include"}', str(source),
-                    f'-L{env / "lib"}', '-lrealsense2', f'-Wl,-rpath,{env / "lib"}', '-o', str(helper)], check=True)
+    helper = helper_path()
+    if helper == LOCAL_HELPER:
+        subprocess.run(['/bin/sh', str(ROOT / 'device_plugins' / 'build_d405_helper.sh')], check=True)
+    elif not helper.is_file():
+        raise RuntimeError(f'找不到 D405 助手：{helper}')
     bridge = subprocess.Popen(['/usr/bin/sudo', '--', str(helper), *([serial] if serial else [])])
     while not bridge_listening():
         if (code := bridge.poll()) is not None:

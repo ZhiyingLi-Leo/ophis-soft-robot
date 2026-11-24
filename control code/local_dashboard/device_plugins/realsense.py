@@ -4,6 +4,8 @@ import importlib.util
 import json
 import math
 import re
+import socket
+import subprocess
 import sys
 import shutil
 import tempfile
@@ -12,6 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from . import macos_camera
 from .vision import analyze
 from .shape3d import BendDirectionHistory
 
@@ -34,6 +37,7 @@ class D405Device:
         self.data_root=Path(data_root)
         self.telemetry=telemetry
         self.halt=threading.Event();self.thread=None
+        self.bridge_process = self.bridge_connection = None
         self.jpeg=None;self.recording=None
         self.bend_history=BendDirectionHistory()
         self.settings=dict(roi=[0.,0.,1.,1.],white_min=85,white_sat=100,length_mm=30.,diameter_mm=6.)
@@ -91,6 +95,8 @@ class D405Device:
         if missing:raise ValueError('相机依赖未安装: '+', '.join(missing)+'；请运行 scripts/camera_check.py 检查环境')
         with self.lock:
             if self.thread and self.thread.is_alive():raise ValueError('相机正在连接或运行，请等待或先断开')
+            if self.bridge_process is not None and self.bridge_process.poll() is None:
+                raise ValueError('上一次自动启动的 D405 桥接尚未退出')
             self.halt=threading.Event();self.jpeg=None
             self.bend_history=BendDirectionHistory()
             self.status.update(status='连接中',error='',measurement=None,last_frame_time=None)
@@ -98,10 +104,15 @@ class D405Device:
             self.thread.start()
 
     def disconnect(self):
-        self.halt.set()
         with self.lock:
+            self.halt.set()
             self.status.update(online=False,status='正在断开',measurement=None)
             self.jpeg=None
+            if self.bridge_connection is not None:
+                try:
+                    self.bridge_connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
         self.stop_recording('相机断开')
 
     def close(self):
@@ -165,6 +176,68 @@ class D405Device:
         i=profile.as_video_stream_profile().get_intrinsics()
         return dict(width=i.width,height=i.height,fx=i.fx,fy=i.fy,ppx=i.ppx,ppy=i.ppy,model=str(i.model),coeffs=list(i.coeffs))
 
+    def _start_bridge(self, serial, errors):
+        helper = macos_camera.helper_path()
+        if not helper.is_file():
+            raise RuntimeError('找不到 D405 采集助手。请运行 sh device_plugins/build_d405_helper.sh 或双击 start_d405.command。')
+        command = ['/usr/bin/sudo', '-n', '--', str(helper), *([serial] if serial else [])]
+        with self.lock:
+            if self.halt.is_set():
+                return None
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=errors, start_new_session=True)
+            self.bridge_process = process
+        deadline = time.monotonic() + 5
+        while not self.halt.is_set():
+            if process.poll() is not None:
+                errors.seek(0)
+                detail = errors.read(8192).decode(errors='replace').strip()
+                if not detail or any(line.startswith('sudo:') for line in detail.splitlines()):
+                    raise RuntimeError('D405 自动接入需要免密 sudo。请按 CAMERA.md 配置 /etc/sudoers.d/ophis-d405，'
+                                       '或双击 start_d405.command 并在终端输入管理员密码。')
+                raise RuntimeError(f'D405 桥接启动失败：{detail}')
+            try:
+                return macos_camera.connect_bridge()
+            except (FileNotFoundError, ConnectionRefusedError, TimeoutError):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('等待 D405 桥接启动超时，请检查 USB 连接或使用 start_d405.command。') from None
+                self.halt.wait(.1)
+        return None
+
+    def _capture_macos(self, serial, rs):
+        with tempfile.TemporaryFile() as errors:
+            try:
+                conn = macos_camera.connect_bridge()
+            except (FileNotFoundError, ConnectionRefusedError):
+                conn = self._start_bridge(serial, errors)
+            if conn is None:
+                return
+            with conn:
+                with self.lock:
+                    if self.halt.is_set():
+                        return
+                    self.bridge_connection = conn
+                try:
+                    macos_camera.receive(self, serial, rs, conn=conn)
+                finally:
+                    with self.lock:
+                        self.bridge_connection = None
+
+    def _stop_bridge(self):
+        process = self.bridge_process
+        if process is None:
+            return
+        try:
+            # sudo relays SIGTERM to its command. The helper drops to our uid after opening USB.
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            with self.lock:
+                self.status['error'] = f'D405 自动桥接未能退出：{error}'
+        else:
+            self.bridge_process = None
+
     def _capture(self, serial):
         pipeline=None
         try:
@@ -172,13 +245,8 @@ class D405Device:
             import cv2
             import pyrealsense2 as rs
             if sys.platform=='darwin':
-                from .macos_camera import endpoint, receive
-                if endpoint().is_socket():
-                    try:
-                        receive(self,serial,rs)
-                        return
-                    except ConnectionRefusedError:
-                        pass
+                self._capture_macos(serial, rs)
+                return
             devices=[d for d in rs.context().query_devices() if 'D405' in d.get_info(rs.camera_info.name)]
             if serial:devices=[d for d in devices if d.get_info(rs.camera_info.serial_number)==serial]
             if len(devices)!=1:raise RuntimeError('未找到唯一 D405；检查连接，多个设备时填写序列号')
@@ -212,8 +280,11 @@ class D405Device:
                           depth_clock=str(raw_depth.get_frame_timestamp_domain()),color_clock=str(raw_color.get_frame_timestamp_domain()))
                 self._publish(color,native,aligned_array,scale,depth.profile.as_video_stream_profile().intrinsics,info,rs)
         except Exception as e:
-            with self.lock:self.status.update(online=False,error=str(e),status='连接失败 / 采集中断',measurement=None)
+            with self.lock:
+                if not self.halt.is_set():
+                    self.status.update(online=False,error=str(e),status='连接失败 / 采集中断',measurement=None)
         finally:
+            self._stop_bridge()
             if pipeline is not None:
                 try:pipeline.stop()
                 except Exception:pass

@@ -1,11 +1,14 @@
 import importlib.util
 import json
+import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 
+from device_plugins import macos_camera
 from device_plugins.realsense import D405Device
 from launch_d405 import launch
 from sampling import read_plan,require_camera,wait_stable
@@ -35,6 +38,92 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(launch(8765, None), 1)
         compile_helper.assert_called_once()
         open_workbench.assert_not_called()
+
+
+@unittest.skipUnless(VISION, 'optional camera processing dependencies not installed')
+class MacOSBridgeTests(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.helper = Path(root.name) / 'ophis-d405-capture'
+        self.helper.touch()
+        self.camera = D405Device(root.name, lambda: {})
+        self.rs = Mock()
+        self.rs.__spec__ = importlib.util.spec_from_loader('pyrealsense2', loader=None)
+        for mock in (patch('sys.platform', 'darwin'), patch.dict('sys.modules', {'pyrealsense2': self.rs}),
+                     patch.object(macos_camera, 'helper_path', return_value=self.helper)):
+            mock.start()
+            self.addCleanup(mock.stop)
+        self.addCleanup(self.camera.close)
+
+    def test_connect_auto_launches_and_disconnect_reaps_owned_bridge(self):
+        process = Mock()
+        process.poll.return_value = None
+        conn = MagicMock()
+        receiving = threading.Event()
+
+        def receive(camera, serial, rs, **kwargs):
+            self.assertIs(kwargs['conn'], conn)
+            receiving.set()
+            camera.halt.wait(3)
+
+        with patch.object(macos_camera, 'connect_bridge', side_effect=[FileNotFoundError, conn]), \
+             patch.object(macos_camera, 'receive', side_effect=receive) as receiver, \
+             patch('device_plugins.realsense.subprocess.Popen', return_value=process) as popen:
+            self.camera.connect('123456')
+            self.assertTrue(receiving.wait(2), self.camera.snapshot())
+            self.assertIs(self.camera.bridge_process, process)
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.args[0], ['/usr/bin/sudo', '-n', '--', str(self.helper), '123456'])
+            self.assertEqual(popen.call_args.kwargs['stdin'], subprocess.DEVNULL)
+            receiver.assert_called_once_with(self.camera, '123456', self.rs, conn=conn)
+            self.camera.disconnect()
+            self.camera.thread.join(3)
+            self.assertFalse(self.camera.thread.is_alive())
+            process.terminate.assert_called_once_with()
+            process.wait.assert_called_once_with(timeout=2)
+            self.assertIsNone(self.camera.bridge_process)
+            self.assertEqual(self.camera.snapshot()['status'], '未接入')
+
+    def test_close_reuses_manual_bridge_without_stopping_its_process(self):
+        conn = MagicMock()
+        receiving = threading.Event()
+
+        def receive(camera, *_args, **_kwargs):
+            receiving.set()
+            camera.halt.wait(3)
+
+        with patch.object(macos_camera, 'connect_bridge', return_value=conn), \
+             patch.object(macos_camera, 'receive', side_effect=receive), \
+             patch('device_plugins.realsense.subprocess.Popen') as popen:
+            self.camera.connect()
+            self.assertTrue(receiving.wait(2), self.camera.snapshot())
+            self.camera.close()
+            self.assertFalse(self.camera.thread.is_alive())
+            conn.shutdown.assert_called_once()
+            popen.assert_not_called()
+
+    def test_sudo_password_failure_reports_chinese_guidance_without_sdk_fallback(self):
+        process = Mock()
+        process.poll.return_value = 1
+
+        def launch(_args, **kwargs):
+            kwargs['stderr'].write(b'sudo: a password is required\n')
+            kwargs['stderr'].flush()
+            return process
+
+        with patch.object(macos_camera, 'connect_bridge', side_effect=ConnectionRefusedError), \
+             patch('device_plugins.realsense.subprocess.Popen', side_effect=launch):
+            self.camera.connect()
+            self.camera.thread.join(3)
+            self.assertFalse(self.camera.thread.is_alive())
+            error = self.camera.snapshot()['error']
+            self.assertIn('免密 sudo', error)
+            self.assertIn('/etc/sudoers.d/ophis-d405', error)
+            self.assertIn('start_d405.command', error)
+            self.rs.context.assert_not_called()
+            process.terminate.assert_not_called()
+            self.assertIsNone(self.camera.bridge_process)
 
 
 class PluginTests(unittest.TestCase):
@@ -270,8 +359,7 @@ class VisionTests(unittest.TestCase):
             rs.stream=NS(depth='depth',color='color');rs.format=NS(z16='z16',bgr8='bgr8')
             rs.align.return_value.process.return_value=frames
             rs.rs2_deproject_pixel_to_point.side_effect=lambda i,p,z:[(p[0]-160)*z/300,(p[1]-120)*z/300,z]
-            with patch('device_plugins.macos_camera.endpoint') as endpoint, patch.dict('sys.modules',{'pyrealsense2':rs}):
-                endpoint.return_value.is_socket.return_value=False
+            with patch('sys.platform', 'linux'), patch.dict('sys.modules',{'pyrealsense2':rs}):
                 camera._capture('')
             items=[json.loads(x) for x in (path/'frames.jsonl').read_text().splitlines()]
             self.assertEqual(items[0]['kind'],'frame')

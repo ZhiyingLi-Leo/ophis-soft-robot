@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
+from statistics import median
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -48,6 +50,29 @@ class UvcTests(unittest.TestCase):
         result, _ = vision.analyze_rgb(catheter(24), settings)
         self.assertFalse(result['valid'])
         self.assertIsNone(result['angle_deg'])
+
+    def test_1080p_full_frame_analysis_preview_and_auto_roi(self):
+        color = catheter(22, (1920, 1080))
+        self.publish(color, time.monotonic())  # Warm up OpenCV.
+        processing_ms, locating_ms = [], []
+        for number in range(2, 12):
+            start = time.perf_counter()
+            self.publish(color, time.monotonic(), number)
+            processing_ms.append((time.perf_counter()-start)*1000)
+            start = time.perf_counter()
+            roi = vision.locate_rgb_roi(color, self.device.settings)
+            locating_ms.append((time.perf_counter()-start)*1000)
+        self.assertLess(median(processing_ms), 50, processing_ms)
+        self.assertLess(median(locating_ms), 50, locating_ms)
+        state = self.device.snapshot()
+        self.assertEqual(state['format'], dict(width=1920, height=1080, fps=30))
+        self.assertGreater(state['measurement']['angle_deg'], 18)
+        curve = np.asarray(state['measurement']['curve_px'])
+        np.testing.assert_allclose(curve[[0, -1]], [[550, 540], [1120, 680]], atol=12)
+        self.assertLess(roi[0], .15)
+        self.assertGreater(roi[2], .65)
+        jpeg = cv2.imdecode(np.frombuffer(self.device.preview(), np.uint8), cv2.IMREAD_COLOR)
+        self.assertEqual(jpeg.shape, (360, 640, 3))
 
     def test_autolocate_expands_from_full_frame_and_pads_for_excursion(self):
         self.device.command('configure', {'roi':[.82,.10,.98,.35]})
@@ -144,11 +169,15 @@ class UvcTests(unittest.TestCase):
             self.assertEqual(opener.call_count,1)
             self.assertIn('已离线',self.device.snapshot()['error'])
             live = threading.Event()
+            publish = self.device._publish
+            def publish_and_signal(*args, **kwargs):
+                publish(*args, **kwargs)
+                live.set()
             def packets(_, halt):
                 yield dict(host_receive_monotonic=time.monotonic(),frame_number=1,fps=30), catheter()
-                live.set()
                 halt.wait(3)
-            with patch('device_plugins.uvc._packets',side_effect=packets):
+            with patch('device_plugins.uvc._packets',side_effect=packets), \
+                 patch.object(self.device, '_publish', side_effect=publish_and_signal):
                 self.device.connect('ace')
                 self.assertTrue(live.wait(2))
                 self.assertIsNotNone(self.device.preview())
@@ -160,7 +189,7 @@ class UvcTests(unittest.TestCase):
     def test_frame_protocol_preserves_bgr_and_rejects_incomplete_transport(self):
         halted = threading.Event()
         with tempfile.TemporaryFile() as stream:
-            info = dict(width=2,height=1,bytes=8,frame_number=1,fps=30,host_receive_monotonic=7)
+            info = dict(width=2,height=1,bytes=8,frame_number=1,fps=30,host_receive_monotonic=time.monotonic())
             stream.write((json.dumps(info)+'\n').encode() + bytes(range(8)))
             stream.seek(0)
             frames = uvc._packets(stream,halted)
@@ -168,4 +197,88 @@ class UvcTests(unittest.TestCase):
             self.assertEqual(header,info)
             self.assertEqual(image.tolist(),[[[0,1,2],[4,5,6]]])
             with self.assertRaisesRegex(RuntimeError,'进程已退出'):
+                next(frames)
+
+    def test_slow_first_frame_does_not_block_1080p_reader_or_publish_stale_backlog(self):
+        process = Mock()
+        analyzing = threading.Event()
+        drained = threading.Event()
+        published = threading.Event()
+        analyzed = []
+        color = catheter(22, (1920, 1080))
+        clock = SimpleNamespace(now=time.monotonic())
+        clock.monotonic = lambda: clock.now
+        publish = self.device._publish
+
+        def packets(_, halt):
+            yield dict(host_receive_monotonic=clock.now, frame_number=1, fps=30), color
+            if not analyzing.wait(2):
+                raise RuntimeError('frame 1 did not reach analysis')
+            yield dict(host_receive_monotonic=clock.now+.1, frame_number=2, fps=30), color
+            clock.now += 1.3
+            yield dict(host_receive_monotonic=clock.now, frame_number=3, fps=30), color
+            drained.set()
+            halt.wait(3)
+
+        def slow_analysis(frame, settings):
+            if not analyzing.is_set():
+                analyzing.set()
+                if not drained.wait(2):
+                    raise RuntimeError('pipe reader waited for frame 1 analysis')
+            return vision.analyze_rgb(frame, settings)
+
+        def publish_and_signal(info, frame, **kwargs):
+            analyzed.append(info['frame_number'])
+            publish(info, frame, **kwargs)
+            if info['frame_number'] == 1:
+                self.assertIsNone(self.device.snapshot()['frame_number'])
+            else:
+                published.set()
+
+        with patch.object(uvc, 'time', clock), patch.object(uvc, '_packets', side_effect=packets), \
+             patch.object(uvc, 'analyze_rgb', side_effect=slow_analysis), \
+             patch.object(uvc, '_device_list', return_value=[{'id':'ace', 'name':'Insta360 Ace Pro'}]), \
+             patch.object(uvc, '_helper', return_value='/test/helper'), \
+             patch.object(uvc.subprocess, 'Popen', return_value=process), \
+             patch.object(self.device, '_publish', side_effect=publish_and_signal):
+            self.device.connect('ace')
+            try:
+                self.assertTrue(published.wait(3), self.device.snapshot())
+                self.assertEqual(analyzed, [1, 3])
+                state = self.device.snapshot()
+                self.assertTrue(state['online'])
+                self.assertEqual(state['frame_number'], 3)
+                self.assertEqual(state['error'], '')
+            finally:
+                self.device.disconnect()
+                self.device.thread.join(2)
+
+    def test_reader_drops_stale_frames_and_rejects_invalid_timestamps(self):
+        for stamp, error in [(float('nan'), '时间或格式无效'), (100.3, '时间或格式无效'),
+                             (99.8, '停止更新')]:
+            with self.subTest(stamp=stamp), tempfile.TemporaryFile() as stream:
+                for number, timestamp in enumerate((98.5, 99.9, stamp), 1):
+                    info = dict(width=1, height=1, bytes=4, frame_number=number, fps=30,
+                                host_receive_monotonic=timestamp)
+                    stream.write((json.dumps(info)+'\n').encode() + bytes(4))
+                stream.seek(0)
+                with patch.object(uvc, 'time', SimpleNamespace(monotonic=lambda: 100.0)):
+                    frames = uvc._packets(stream, threading.Event())
+                    self.assertEqual(next(frames)[0]['frame_number'], 2)
+                    with self.assertRaisesRegex(RuntimeError, error):
+                        next(frames)
+
+    def test_ongoing_stale_packets_do_not_reset_fresh_frame_timeout(self):
+        clock = SimpleNamespace(now=100.)
+        clock.monotonic = lambda: clock.now
+        with tempfile.TemporaryFile() as stream, patch.object(uvc, 'time', clock):
+            for number, stamp in enumerate((100., 100.1, 100.2), 1):
+                info = dict(width=1, height=1, bytes=4, frame_number=number, fps=30,
+                            host_receive_monotonic=stamp)
+                stream.write((json.dumps(info)+'\n').encode() + bytes(4))
+            stream.seek(0)
+            frames = uvc._packets(stream, threading.Event())
+            self.assertEqual(next(frames)[0]['frame_number'], 1)
+            clock.now = 102.1
+            with self.assertRaisesRegex(RuntimeError, '等待图像超时'):
                 next(frames)
