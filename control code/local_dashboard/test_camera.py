@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 from device_plugins import macos_camera
@@ -16,6 +17,51 @@ from server import Engine
 
 CONFIG=Path(__file__).parent.parent/'system_control'/'cylinders.conf.example'
 VISION=bool(importlib.util.find_spec('cv2') and importlib.util.find_spec('numpy'))
+
+
+class D405DiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.camera = D405Device(Path('unused'), Mock())
+        self.sdk = Mock()
+        self.sdk.camera_info = SimpleNamespace(name='name', serial_number='serial', firmware_version='firmware')
+        self.query = self.sdk.context.return_value.query_devices
+
+    def test_lists_only_d405_devices_without_starting_capture(self):
+        def device(name, serial, firmware):
+            hardware = Mock()
+            hardware.get_info.side_effect = dict(name=name, serial=serial, firmware=firmware).__getitem__
+            return hardware
+
+        other = device('Intel RealSense D455', '455-1', '5.0')
+        self.query.return_value = [other, device('Intel RealSense D405', '405-1', '5.16'),
+                                   device('RealSense d405', '405-2', '5.17')]
+        with patch.dict('sys.modules', {'pyrealsense2': self.sdk}), \
+             patch.object(self.camera, '_capture') as capture:
+            self.assertEqual(self.camera.discover(), [
+                {'serial': '405-1', 'name': 'Intel RealSense D405', 'firmware': '5.16'},
+                {'serial': '405-2', 'name': 'RealSense d405', 'firmware': '5.17'},
+            ])
+        self.query.assert_called_once_with()
+        other.get_info.assert_called_once_with('name')
+        self.sdk.pipeline.assert_not_called()
+        capture.assert_not_called()
+        self.assertFalse(self.camera.status['online'])
+
+    def test_empty_list(self):
+        self.query.return_value = []
+        with patch.dict('sys.modules', {'pyrealsense2': self.sdk}):
+            self.assertEqual(self.camera.discover(), [])
+
+    def test_missing_sdk_error(self):
+        with patch.dict('sys.modules', {'pyrealsense2': None}):
+            with self.assertRaisesRegex(RuntimeError, '无法加载 pyrealsense2'):
+                self.camera.discover()
+
+    def test_query_failure_error(self):
+        self.query.side_effect = OSError('USB unavailable')
+        with patch.dict('sys.modules', {'pyrealsense2': self.sdk}):
+            with self.assertRaisesRegex(RuntimeError, '枚举 D405 设备失败.*USB unavailable'):
+                self.camera.discover()
 
 
 class LauncherTests(unittest.TestCase):

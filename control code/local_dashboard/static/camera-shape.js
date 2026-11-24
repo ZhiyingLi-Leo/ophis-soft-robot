@@ -21,10 +21,10 @@ export function createCameraShape(canvas) {
   const geometry = new THREE.Group();
   const centerline = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({color:0x16817c}));
   const reference = new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(), 12, 0xc77e35, 2.8, 1.4);
-  const tangent = new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(), 10, 0xc84b55, 2.8, 1.4);
+  const tangent = new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(), 10, 0x285b88, 2.8, 1.4);
   const point = new THREE.SphereGeometry(.85, 10, 8);
   const root = new THREE.Mesh(point, new THREE.MeshBasicMaterial({color:0x386ca4}));
-  const tip = new THREE.Mesh(point, new THREE.MeshBasicMaterial({color:0xc84b55}));
+  const tip = new THREE.Mesh(point, new THREE.MeshBasicMaterial({color:0x285b88}));
   geometry.add(centerline, reference, tangent, root, tip);
   geometry.visible = false;
   scene.add(geometry);

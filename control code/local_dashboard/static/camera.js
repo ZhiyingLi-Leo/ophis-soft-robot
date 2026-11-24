@@ -47,45 +47,98 @@ export function installRoiDrag(image, box, {enabled, onSelection, onDrag=()=>{}}
 
 export function setupCamera(act, showProgress){
   let state=null,busy=false,lastFrame=null,imageUrl=null;
-  let setup=false,applied=false,drawing=null,previewSettings=null,confirming=false,experimentRunning=false,axesReady=false;
-  const image=$('#cpreview'), box=$('#cropbox');
+  let setup=false,applied=null,drawing=false,previewSettings=null,confirming=false,experimentRunning=false,axesReady=false;
+  let listing=false,connecting=false,configuring=false,serialRequired=false,notice='',settingsSignature='';
+  const image=$('#cpreview'), box=$('#cropbox'), select=$('#cdevices');
+  const card=$('#d405-card'), shapeDrawer=$('#cameraShapeDrawer');
   const shapePanel=$('#cameraShapePanel');
   let shapeView=null, webglFailed=false;
   const roiIds=['cx0','cy0','cx1','cy1'];
   const device=(operation,arguments_={})=>act('device',{device:'camera.d405',operation,arguments:arguments_});
-  $('#cconnect').onclick=()=>device(state?.online||state?.status==='连接中'||state?.status==='等待首帧'?'disconnect':'connect',{serial:$('#cserial').value.trim()});
+  const connected=()=>state?.online||['连接中','等待首帧'].includes(state?.status);
+  const cameraFresh=()=>state?.online&&state.frame_age!==null&&state.frame_age<2;
+  const canConfigure=()=>!!state&&!experimentRunning&&!state.recording&&!configuring&&!confirming;
+  function controls(){
+    const active=connected();
+    $('#cdiscover').disabled=!state||experimentRunning||listing;
+    select.disabled=!state||experimentRunning||listing||connecting||active;
+    $('#cconnect').textContent=active?'断开 D405':'接入 D405';
+    $('#cconnect').disabled=!state||experimentRunning||connecting||state.status==='正在断开'
+      ||(!active&&(listing||(serialRequired&&!select.value)));
+    $('#d405-config').disabled=!canConfigure();
+    $('#crecord').disabled=experimentRunning||!cameraFresh()||state.recording;
+    $('#crecordstop').disabled=experimentRunning||!state?.recording;
+    image.classList.toggle('drawing-enabled',cameraFresh()&&canConfigure());
+    $('#cerror').textContent=state?.error||state?.record_error||notice;
+  }
+  $('#cdiscover').onclick=async()=>{
+    listing=true;notice='';controls();
+    try{
+      const response=await fetch('/api/camera/d405/devices',{signal:AbortSignal.timeout(5000)});
+      const devices=await response.json();
+      if(!response.ok)throw Error(devices.error);
+      const selected=(connected()&&state?.calibration?.serial)||select.value;
+      serialRequired=devices.length>1;
+      select.replaceChildren(new Option(serialRequired?'请选择 D405':'自动匹配 · 单台 D405',''));
+      for(const {serial,name,firmware} of devices){
+        const option=new Option(`${name} · ${serial}`,serial);
+        if(firmware)option.title=`固件 ${firmware}`;
+        select.add(option);
+      }
+      if(devices.length===1)select.value=devices[0].serial;
+      else if(devices.some(d=>d.serial===selected))select.value=selected;
+      if(!devices.length)notice='SDK 未发现 D405。请检查 USB；单台相机可尝试自动匹配。';
+    }catch(e){notice=e.message;}finally{listing=false;controls();}
+  };
+  select.onchange=controls;
+  $('#cconnect').onclick=async()=>{
+    connecting=true;notice='';controls();
+    try{
+      if(connected())await device('disconnect');
+      else await device('connect',{serial:select.value});
+    }finally{connecting=false;controls();}
+  };
   $('#crecord').onclick=()=>device('record_start',{label:$('#clabel').value.trim()});
   $('#crecordstop').onclick=()=>device('record_stop');
   async function apply(){
-    applied=false; renderPretest();
-    applied=await device('configure',{
-      roi:roiIds.map(id=>Number($('#'+id).value)/100),
-      white_min:Number($('#cwhite').value),white_sat:Number($('#csat').value)
-    });
-    renderPretest();
+    if(!canConfigure())return;
+    const settings={
+      roi:roiIds.map(id=>$('#'+id).valueAsNumber/100),
+      white_min:$('#cwhite').valueAsNumber,white_sat:$('#csat').valueAsNumber
+    };
+    applied=null;
+    if(![...settings.roi,settings.white_min,settings.white_sat].every(Number.isFinite)){
+      notice='请填写全部 ROI 和颜色参数。';controls();renderPretest();return;
+    }
+    configuring=true;notice='';controls();renderPretest();
+    try{
+      if(await device('configure',settings))applied=settings;
+    }finally{configuring=false;controls();renderPretest();}
   }
   $('#capply').onclick=apply;
-  for(const id of [...roiIds,'cwhite','csat'])$('#'+id).oninput=()=>{applied=false;renderPretest();};
+  for(const id of [...roiIds,'cwhite','csat'])$('#'+id).oninput=()=>{applied=null;renderPretest();};
   $('#pretestlimit').oninput=renderPretest;
   $('#pretestcancel').onclick=()=>{setup=false;renderPretest();showProgress();};
   $('#pretestconfirm').onclick=async()=>{
     if($('#pretestconfirm').disabled)return;
-    confirming=true;renderPretest();
+    confirming=true;controls();renderPretest();
     const started=await act('pretest_start',{settings:state.settings,max_advance_mm:$('#pretestlimit').valueAsNumber});
     confirming=false;
     if(started){setup=false;showProgress();}
-    renderPretest();
+    controls();renderPretest();
   };
   function renderPretest(){
     $('#pretestsetup').hidden=!setup;
-    image.classList.toggle('drawing-enabled',setup&&!experimentRunning);
     if(!setup)return;
-    const current=state?.online&&state.frame_age!==null&&state.frame_age<1;
-    const settingsMatch=state&&JSON.stringify(state.settings)===JSON.stringify(previewSettings)
+    const current=cameraFresh()&&state.frame_age<1;
+    const settingsMatch=applied&&state&&Object.entries(applied).every(([key,value])=>
+      JSON.stringify(state.settings[key])===JSON.stringify(value))
+      &&JSON.stringify(state.settings)===JSON.stringify(previewSettings)
       &&JSON.stringify(state.settings)===JSON.stringify(state.measurement_settings);
     const limit=$('#pretestlimit').valueAsNumber;
     let hint='';
     if(!current)hint='接入 D405 并等待新鲜图像。';
+    else if(configuring)hint='正在应用识别参数。';
     else if(!applied)hint='在图像上拖框，或输入边界后应用参数。';
     else if(!settingsMatch)hint='等待新识别区域的预览。';
     else if(!state.measurement?.shape_3d?.valid)hint=state.measurement?.shape_3d?.reason||'等待有效三维中心线。';
@@ -95,30 +148,27 @@ export function setupCamera(act, showProgress){
     $('#pretestconfirm').disabled=!!hint||confirming||experimentRunning||state.recording||!!drawing;
   }
   installRoiDrag(image, box, {
-    enabled:()=>setup&&!experimentRunning&&!state?.recording,
+    enabled:()=>cameraFresh()&&canConfigure(),
     onDrag:active=>{drawing=active;renderPretest();},
     onSelection:bounds=>{
-      if(!bounds){$('#pretestready').textContent='区域宽高至少占画面的 5%，请重新拖框。';return;}
+      if(!bounds){notice='区域宽高至少占画面的 5%，请重新拖框。';controls();return;}
       bounds.forEach((value,i)=>$('#'+roiIds[i]).value=(value*100).toFixed(2));
       apply();
     }
   });
-  for(const b of document.querySelectorAll('[data-camera-command]'))b.onclick=()=>{
-    $('#command').value=b.dataset.cameraCommand;$('#command').dispatchEvent(new Event('input'));$('#command').focus();
-  };
   function clearPreview(){
     if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=null;lastFrame=null;
     previewSettings=null;
     $('#cpreview').removeAttribute('src');$('#cpreview').hidden=true;$('#cplaceholder').hidden=false;
   }
   async function preview(c){
-    if(busy||!c.online||c.frame_age===null||c.frame_age>2||document.body.dataset.page!=='camera'||lastFrame===c.frame_number)return;
+    if(busy||card.hidden||document.body.dataset.page!=='camera'||lastFrame===c.frame_number)return;
     busy=true;
     try{
       const response=await fetch('/api/camera/preview',{signal:AbortSignal.timeout(2000)});
       if(!response.ok)throw Error('暂无新鲜图像');
       const blob=await response.blob();
-      if(!state?.online)return;
+      if(!cameraFresh())return;
       if(imageUrl)URL.revokeObjectURL(imageUrl);
       imageUrl=URL.createObjectURL(blob);
       const shown=JSON.parse(response.headers.get('X-Camera-Settings'));
@@ -129,50 +179,54 @@ export function setupCamera(act, showProgress){
   }
   const num=(v,d=1)=>Number.isFinite(v)?v.toFixed(d):'—';
   function renderShape(s, fresh){
-    const cameraPage=document.body.dataset.page==='camera';
-    const running=s?.experiment?.status==='running'&&s.experiment.pretest;
-    const slot=cameraPage||!running?$('#cameraShapeSlot'):$('#pretestShapeSlot');
+    const page=document.body.dataset.page;
+    const showProgress=page==='console'&&s?.experiment?.status==='running'&&s.experiment.pretest;
+    const slot=showProgress?$('#pretestShapeSlot'):$('#cameraShapeSlot');
     if(shapePanel.parentElement!==slot)slot.append(shapePanel);
+    if(!showProgress&&(page!=='camera'||card.hidden||!shapeDrawer.open))return;
     const shape=fresh?s.camera.measurement?.shape_3d:null;
-    if(!shapeView&&!webglFailed&&(cameraPage||running)){
+    if(!shapeView&&!webglFailed){
       try {shapeView=createCameraShape($('#cameraShapeCanvas'));}
       catch {webglFailed=true;$('#cameraShapeCanvas').hidden=true;}
     }
     $('#cameraShapeStatus').textContent=webglFailed?'三维视图需要浏览器 WebGL 支持':shape?.valid?'':(shape?.reason||'等待有效三维中心线');
-    if(cameraPage||running)shapeView?.update(shape,s?.camera.frame_number);
+    shapeView?.update(shape,s?.camera.frame_number);
+  }
+  function syncSettings(force=false){
+    if(!state)return;
+    const signature=JSON.stringify(state.settings);
+    if(!force&&signature===settingsSignature)return;
+    settingsSignature=signature;
+    state.settings.roi.forEach((v,i)=>$('#'+roiIds[i]).value=+(v*100).toFixed(4));
+    $('#cwhite').value=state.settings.white_min;$('#csat').value=state.settings.white_sat;
   }
   function render(s){
     const c=state=s?.camera;
-    if(!c){clearPreview();$('#cstatus').textContent='服务离线';for(const id of ['cconnect','crecord','crecordstop','capply'])$('#'+id).disabled=true;renderPretest();renderShape(null,false);return;}
+    if(!c){
+      clearPreview();controls();$('#cstatus').textContent='服务离线';$('#cstatus').className='status';
+      renderPretest();renderShape(null,false);return;
+    }
     const running=['running','stopping'].includes(s.experiment?.status);
     experimentRunning=running;
     axesReady=s.axes.every(a=>a.online&&!a.error&&!a.moving&&a.age!==null&&a.age<1);
-    const fresh=c.online&&c.frame_age!==null&&c.frame_age<2;
+    const fresh=cameraFresh();
+    syncSettings();controls();
     $('#cstatus').textContent=c.error?'故障':c.status;
     $('#cstatus').className='status '+(c.error?'error':fresh?'ready':'');
-    $('#cnavstatus').textContent='D405 '+(fresh?'在线':c.error?'故障':'未接入');
-    $('#cconnect').textContent=c.online||['连接中','等待首帧'].includes(c.status)?'断开 D405':'接入 D405';
-    $('#cconnect').disabled=running||c.status==='正在断开';$('#capply').disabled=running||c.recording;
-    $('#crecord').disabled=running||!fresh||c.recording;$('#crecordstop').disabled=running||!c.recording;
     const missing=Object.entries(c.dependencies).filter(([,v])=>!v).map(([k])=>k);$('#cdeps').textContent=missing.length?'缺少 '+missing.join('、'):'已就绪';
-    $('#cerror').textContent=c.error||c.record_error||'';
-    $('#cframes').textContent=String(c.processed_frames);$('#cage').textContent=num(c.frame_age,2)+' s';
+    $('#cframes').textContent=String(c.processed_frames);$('#cage').textContent=Number.isFinite(c.frame_age)?num(c.frame_age,2)+' s':'—';
     const shape=fresh?c.measurement?.shape_3d:null;
     $('#csurface').textContent=shape?.valid?num(shape.angle_deg)+'°':'—';
     $('#cdepth').textContent=fresh?`${shape?.observed_indices?.length??0} / 21`:'—';
-    $('#crecordstate').textContent=c.recording?'记录中 · '+c.recorded_frames+' 帧':'已停止 · '+c.recorded_frames+' 帧';
+    $('#crecordstate').textContent=c.recording?'记录中 · '+c.recorded_frames+' 帧':c.recorded_frames?'已记录 · '+c.recorded_frames+' 帧':'未记录';
     $('#csession').textContent=c.session_path||'记录将在本机 data/ 下创建实验目录';
-    $('#summarycamera').textContent=fresh?'D405 · 采集中':c.error?'D405 · 接入故障':'D405 · 未接入';
     if(!fresh)clearPreview();else preview(c);
     renderPretest();
     renderShape(s,fresh);
   }
   return {render,beginPretest(){
-    setup=true;applied=false;$('#pretestlimit').value='';
-    if(state?.settings){
-      state.settings.roi.forEach((v,i)=>$('#'+roiIds[i]).value=(v*100).toFixed(2));
-      $('#cwhite').value=state.settings.white_min;$('#csat').value=state.settings.white_sat;
-    }
+    setup=true;applied=null;$('#pretestlimit').value='';shapeDrawer.open=true;
+    syncSettings(true);
     renderPretest();
   }};
 }

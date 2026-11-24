@@ -26,7 +26,7 @@ export function setupSideCamera(act){
   }
   function controls(){
     $('side-config').disabled=!camera||locked||pending;
-    $('side-locate').disabled=!fresh;
+    $('side-locate').disabled=!fresh||locked||pending;
     $('side-lock').hidden=!locked;
     $('side-discover').disabled=!camera||locked||listing;
     select.disabled=!camera||locked||listing||activeConnection();
@@ -84,7 +84,7 @@ export function setupSideCamera(act){
     image.removeAttribute('src');image.hidden=true;$('side-placeholder').hidden=false;
   }
   async function preview(){
-    if(previewPending||camera.frame_number===lastFrame||document.body.dataset.page!=='camera')return;
+    if(previewPending||camera.frame_number===lastFrame||$('side-card').hidden||document.body.dataset.page!=='camera')return;
     const frame=camera.frame_number, deviceId=camera.device_id;
     previewPending=true;
     try{
@@ -106,7 +106,6 @@ export function setupSideCamera(act){
     const status=$('side-status');
     status.textContent=camera?.error?'故障':camera?.status||'服务离线';
     status.className='status '+(camera?.error?'error':fresh?'ready':'');
-    $('side-nav-status').textContent='侧视 '+(camera?.error?'故障':fresh?'在线':'未接入');
     const measuring=fresh&&JSON.stringify(camera.settings)===JSON.stringify(camera.measurement_settings);
     const angle=camera?.measurement?.angle_deg;
     $('side-angle').textContent=measuring&&Number.isFinite(angle)?`${angle>0?'+':''}${angle.toFixed(1)}°`:'—';

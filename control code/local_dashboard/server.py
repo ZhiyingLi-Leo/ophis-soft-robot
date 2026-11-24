@@ -661,9 +661,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.trusted(): self.send(403, {'error':'仅允许本机同源请求'}); return
         if self.path == '/api/state': self.send(200, self.server.engine.state()); return
-        if self.path == '/api/camera/side-view/devices':
+        if self.path in ('/api/camera/d405/devices', '/api/camera/side-view/devices'):
+            engine = self.server.engine
+            camera = engine.camera if self.path == '/api/camera/d405/devices' else engine.side_view
             try:
-                self.send(200, self.server.engine.side_view.discover())
+                self.send(200, camera.discover())
             except (ValueError, RuntimeError) as error:
                 self.send(503, {'error': str(error)})
             return

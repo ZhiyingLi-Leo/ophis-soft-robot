@@ -473,6 +473,37 @@ class Tests(unittest.TestCase):
         self.assertLess(self.e.side_view.snapshot()['settings']['roi'][2],1.)
         self.assertEqual(self.e.camera.settings,original)
 
+    def test_http_d405_devices(self):
+        with ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
+            server.engine = self.e
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f'http://127.0.0.1:{server.server_port}/api/camera/d405/devices'
+            devices = [{'serial': '123456', 'name': 'Intel RealSense D405', 'firmware': '5.16'}]
+            try:
+                with patch.object(self.e.camera, 'discover', return_value=devices) as discover, \
+                     patch.object(self.e.camera, 'connect') as connect, \
+                     patch.object(self.e.side_view, 'discover') as side_discover:
+                    with urlopen(url) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(json.load(response), devices)
+                    discover.assert_called_once_with()
+                    connect.assert_not_called()
+                    side_discover.assert_not_called()
+                    with self.assertRaises(HTTPError) as denied:
+                        urlopen(Request(url, headers={'Origin': 'https://evil.example'}))
+                    self.assertEqual(denied.exception.code, 403)
+                    self.assertEqual(discover.call_count, 1)
+                with patch.object(self.e.camera, 'discover', side_effect=RuntimeError('枚举 D405 设备失败')):
+                    with self.assertRaises(HTTPError) as unavailable:
+                        urlopen(url)
+                    with unavailable.exception as response:
+                        self.assertEqual(response.code, 503)
+                        self.assertEqual(json.load(response), {'error': '枚举 D405 设备失败'})
+            finally:
+                server.shutdown()
+                thread.join()
+
     def test_http_local_only(self):
         import urllib.request
         server=ThreadingHTTPServer(('127.0.0.1',0),Handler); server.engine=self.e

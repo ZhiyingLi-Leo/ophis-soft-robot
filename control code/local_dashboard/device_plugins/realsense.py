@@ -27,6 +27,13 @@ def dependencies():
     return result
 
 
+def _d405_devices(rs):
+    for device in rs.context().query_devices():
+        name = device.get_info(rs.camera_info.name)
+        if re.search(r'\bD405\b', name, re.IGNORECASE):
+            yield device, name
+
+
 class D405Device:
     kind='camera'
     key='camera.d405'
@@ -44,6 +51,20 @@ class D405Device:
         self.status=dict(online=False,name='RealSense D405',status='未接入',error='',last_frame_time=None,
                          frame_number=None,frame_age=None,measurement=None,measurement_settings=None,calibration=None,
                          processed_frames=0,recorded_frames=0,recording=False,session_path='',record_error='')
+
+    def discover(self):
+        """Read the SDK device list without opening streams or starting the macOS bridge."""
+        try:
+            import pyrealsense2 as rs
+            return [
+                dict(serial=device.get_info(rs.camera_info.serial_number), name=name,
+                     firmware=device.get_info(rs.camera_info.firmware_version))
+                for device, name in _d405_devices(rs)
+            ]
+        except ImportError as error:
+            raise RuntimeError('无法加载 pyrealsense2，请运行 scripts/camera_check.py 检查相机环境。') from error
+        except Exception as error:
+            raise RuntimeError(f'枚举 D405 设备失败：{error}') from error
 
     def snapshot(self):
         with self.lock:
@@ -247,9 +268,9 @@ class D405Device:
             if sys.platform=='darwin':
                 self._capture_macos(serial, rs)
                 return
-            devices=[d for d in rs.context().query_devices() if 'D405' in d.get_info(rs.camera_info.name)]
+            devices=[device for device, _ in _d405_devices(rs)]
             if serial:devices=[d for d in devices if d.get_info(rs.camera_info.serial_number)==serial]
-            if len(devices)!=1:raise RuntimeError('未找到唯一 D405；检查连接，多个设备时填写序列号')
+            if len(devices)!=1:raise RuntimeError('未找到唯一 D405，请检查连接；有多台设备时请选择序列号')
             device=devices[0];serial=device.get_info(rs.camera_info.serial_number)
             pipeline=rs.pipeline();config=rs.config();config.enable_device(serial)
             config.enable_stream(rs.stream.depth,640,480,rs.format.z16,30)

@@ -29,10 +29,7 @@ async function act(action, data = {}, quiet = false) {
 function statusText(axis) { return axis.error ? (axis.online&&axis.comm_failures?'通信恢复中':'故障') : !axis.online ? '未接入' : axis.moving ? '运动中' : axis.armed ? '已启用' : '已连接'; }
 function statusClass(axis) { return axis.error ? 'error' : !axis.online ? '' : axis.moving ? 'busy' : 'ready'; }
 function selectAxis(i) { selected=i; render(); }
-const cameraPanel=setupCamera(act,()=>{
-  showPage('overview');
-  $('#pretestopen').closest('.consolepanel').scrollIntoView({block:'start'});
-});
+const cameraPanel=setupCamera(act,()=>showPage('console'));
 const sideCameraPanel=setupSideCamera(act);
 setupGamepad(act,()=>state,client);
 $('#axes').innerHTML = Array.from({length:3}, (_,i) => `
@@ -67,22 +64,47 @@ for (let i=0;i<3;i++) {
 }
 for (const b of document.querySelectorAll('[data-view]')) b.onclick=()=>model.view(b.dataset.view);
 $('#resetview').onclick=()=>model.view('overview');
+const pages={
+  overview:['overviewcards','系统总览'],
+  hydraulic:['hydraulicpage','液压驱动'],
+  prop:['propsection','滚轮推进器'],
+  camera:['camerasection','相机'],
+  console:['consolepage','实验控制台']
+};
 function showPage(name){
   if (page !== name && state?.owner===client && state.propulsion.targets.some(Boolean)) endProp();
   page=name;
-  window.scrollTo({top:0,behavior:'instant'});
-  for(const [id,key] of [['hydraulicpage','hydraulic'],['propsection','prop'],['camerasection','camera'],['overviewcards','overview']])$('#'+id).hidden=key!==name;
-  for(const key of ['overview','hydraulic','prop','camera'])$('#nav'+key).classList.toggle('selected',key===name);
-  $('.viewportpanel').hidden=name==='camera';
-  $('#pagetitle').textContent={overview:'系统总览',hydraulic:'液压驱动',prop:'滚轮推进器',camera:'相机'}[name];
+  for(const [key,[id]] of Object.entries(pages)){
+    const selected=key===name, nav=$('#nav'+key);
+    $('#'+id).hidden=!selected;
+    nav.classList.toggle('selected',selected);
+    if(selected)nav.setAttribute('aria-current','page');
+    else nav.removeAttribute('aria-current');
+  }
+  const showModel=name!=='camera'&&name!=='console';
+  $('.viewportpanel').hidden=!showModel;
+  $('#camera-view-mode').hidden=name!=='camera';
+  $('.headingmeta').hidden=name==='camera'||name==='console';
+  $('#pagetitle').textContent=pages[name][1];
   document.body.dataset.page=name;
   $('.channels').hidden=name==='prop';
   $('#selectedmodel').textContent=name==='prop'?'M1–M4 / 板端状态':`通道 0${selected+1} / ID ${state?.axes[selected].id??selected+1}`;
-  model.view(name==='hydraulic'?'hydraulic':name==='prop'?'advancer':'overview');
+  if(showModel)model.view(name==='hydraulic'?'hydraulic':name==='prop'?'advancer':'overview');
+  if(state)cameraPanel.render(state);
   document.body.classList.remove('devicesopen');$('#devicepanel').setAttribute('aria-expanded','false');
+  window.scrollTo({top:0,behavior:'instant'});
 }
-for(const key of ['overview','hydraulic','prop','camera'])$('#nav'+key).onclick=()=>showPage(key);
+for(const key of Object.keys(pages))$('#nav'+key).onclick=()=>showPage(key);
 document.addEventListener('componentselect',e=>showPage(e.detail));
+const cameraModeButtons=document.querySelectorAll('[data-camera-view]');
+function showCameraMode(mode){
+  $('#camerasection').dataset.viewMode=mode;
+  $('#d405-card').hidden=mode==='side';
+  $('#side-card').hidden=mode==='d405';
+  for(const button of cameraModeButtons)button.setAttribute('aria-pressed',String(button.dataset.cameraView===mode));
+  if(state)cameraPanel.render(state);
+}
+for(const button of cameraModeButtons)button.onclick=()=>showCameraMode(button.dataset.cameraView);
 $('#motorcards').innerHTML=Array.from({length:4},(_,i)=>`<article class="motorcard"><header>M${i+1}<span id="mstate${i}">无反馈</span></header><strong id="mspeed${i}">—</strong><small>step/s · 板端脉冲频率</small><p>电流设定 <b id="mcurrent${i}">—</b> mA</p><label class="motorspeed">速度 <input id="speedmotor${i}" type="number" value="400" min="0" max="1600" step="1" aria-label="M${i+1} 速度"> step/s</label><button id="applymotor${i}">应用速度</button><div class="motorbuttons"><button id="reverse${i}">后退</button><button id="halt${i}">停止</button><button id="forward${i}">前进</button></div></article>`).join('');
 function speedValue(id){const input=$('#'+id),v=input.valueAsNumber;if(!input.value.trim()||!Number.isInteger(v)||v<0||v>1600){toast('速度须为 0–1600 的整数');return null;}return v;}
 for(let i=0;i<4;i++){
@@ -90,8 +112,13 @@ for(let i=0;i<4;i++){
   $('#halt'+i).onclick=()=>act('motor_stop',{motor:i});
   $('#applymotor'+i).onclick=()=>{const v=speedValue('speedmotor'+i),t=state?.propulsion.targets[i]||0;if(v!==null&&t)act('motor',{motor:i,value:Math.sign(t)*v});else if(v!==null)toast('速度已设置，选择前进或后退启动');};
 }
-$('#overviewcards').innerHTML=[['hydraulic','01','液压驱动','三通道独立位移'],['prop','02','滚轮推进器','四电机状态'],['camera','03','深度视觉','RealSense D405']].map(([key,num,title,sub])=>`<button class="summarycard" data-page="${key}"><span>${num} / ${sub}</span><h3>${title} →</h3><p id="summary${key}">未接入</p></button>`).join('');
-for(const button of document.querySelectorAll('[data-page]'))button.onclick=()=>showPage(button.dataset.page);
+$('#overviewcards').innerHTML=Object.keys(pages).slice(1).map((key,index)=>{
+  const title=key==='camera'?'双目视觉':pages[key][1];
+  const status=key==='camera'?'<span id="summaryd405">D405 未接入</span><span id="summaryside">侧视 未接入</span>'
+    :`<span id="summary${key}">${key==='console'?'空闲':'未接入'}</span>`;
+  return `<button class="summarycard" data-page="${key}"><span class="summarytitle"><span>0${index+1}</span> ${title}</span><span class="summaryreadout">${status}</span></button>`;
+}).join('');
+for(const button of $('#overviewcards').querySelectorAll('[data-page]'))button.onclick=()=>showPage(button.dataset.page);
 async function scan() {
   $('#scan').disabled=true;$('#scan').textContent='…';
   await act('scan');$('#scan').textContent='↻';$('#scan').disabled=false;
@@ -112,8 +139,17 @@ for(const [id,sign] of [['pback',-1],['pforward',1]])$('#'+id).onclick=()=>{cons
 $('#applygroup').onclick=()=>{const v=speedValue('groupspeed'),targets=state?.propulsion.targets||[];if(v===null)return;if(targets.length&&targets.every(t=>t===targets[0])&&targets[0])act('propulsion',{value:Math.sign(targets[0])*v});else toast('速度已设置，选择一起前进或后退启动');};
 const connectionWorker=new Worker('/connection-worker.js');
 connectionWorker.postMessage({client,renewMotors:false});
-connectionWorker.onmessage=({data})=>{$('#heartbeatstatus').textContent=!data.ok?'心跳失败：'+data.error:data.accepted?'控制心跳正常':data.owner?'其他页面持有控制权':'服务已连接 · 尚未取得控制权';};
-connectionWorker.onerror=e=>{$('#heartbeatstatus').textContent='心跳线程错误：'+e.message;};
+function showHeartbeat(label, error=''){
+  const status=$('#heartbeatstatus');
+  status.textContent=label;
+  status.title=error;
+  status.classList.toggle('error',!!error);
+}
+connectionWorker.onmessage=({data})=>showHeartbeat(
+  !data.ok?'心跳失败':data.accepted?'心跳正常':data.owner?'其他页面控制':'等待控制权',
+  data.ok?'':data.error||'未收到心跳响应'
+);
+connectionWorker.onerror=e=>showHeartbeat('心跳线程错误',e.message);
 window.addEventListener('keydown',e=>{if(e.key==='Escape')act('stop_all');});
 
 function renderDevices(){
@@ -126,6 +162,17 @@ function renderDevices(){
     state.devices.map(d=>`<div class="device"><label><input type="radio" name="port" value="${escapeHtml(d.port)}" ${port===d.port?'checked':''}>${escapeHtml(d.port.replace('/dev/cu.',''))}</label><p>${escapeHtml(d.kind)} ${d.ids.length?'· ID '+d.ids.join(' / '):''} ${escapeHtml(d.error||'')}</p></div>`).join(''):'<p class="empty">尚未扫描设备</p>';
   document.querySelectorAll('input[name=port]').forEach(e=>e.onchange=()=>port=e.value);
 }
+function renderCameraTopology(){
+  const d405=state?.camera, side=state?.modules?.['camera.side_view']?.state;
+  const cameraCount=Number(!!d405?.online)+Number(!!side?.online);
+  const devices=state?state.axes.filter(a=>a.online).length+Number(state.propulsion.online)+cameraCount:0;
+  $('#count').textContent=`${devices} / 6`;
+  $('#cameradot').className='dot '+(d405?.error||side?.error?'fault':cameraCount===2?'online':cameraCount===1?'partial':'');
+  for(const [camera,label,navId,summaryId] of [[d405,'D405','cnavstatus','summaryd405'],[side,'侧视','side-nav-status','summaryside']]){
+    const status=!state?'服务离线':camera?.error?'故障':camera?.online?'在线':camera?.status||'未接入';
+    $('#'+navId).textContent=$('#'+summaryId).textContent=`${label} ${status}`;
+  }
+}
 function render(){
   if(!state)return;
   connectionWorker.postMessage({client,renewMotors:state.owner===client&&!['running','stopping'].includes(state.experiment?.status)&&state.propulsion.targets.some(Boolean)});
@@ -134,8 +181,7 @@ function render(){
   $('#notice').textContent='扫描后接入设备；重连不恢复运动。';
   $('#controlreason').textContent=state.stop_reason?'最近停机：'+state.stop_reason:'';
   $('#controlreason').hidden=!state.stop_reason;
-  const side=state.modules?.['camera.side_view']?.state;
-  $('#count').textContent=`${state.axes.filter(a=>a.online).length+Number(state.propulsion.online)+Number(state.camera.online)+Number(!!side?.online)} / 6`;
+  renderCameraTopology();
   for(let i=0;i<3;i++){
     const a=state.axes[i];
     $('#axis'+i).classList.toggle('selected',selected===i);$('#axisnav'+i).classList.toggle('selected',selected===i);
@@ -166,8 +212,6 @@ function render(){
   $('#summaryprop').textContent=p.error?'板端故障':p.online?`${p.backend.toUpperCase()} · ${fresh?'四路遥测在线':'暂无四路遥测'}`:'未接入';
   cameraPanel.render(state);
   sideCameraPanel.render(state);
-  const cameraFault=state.camera.error||side?.error;
-  $('#cameradot').className='dot '+(cameraFault?'fault':state.camera.online||side?.online?'online':'');
   renderDevices();
   renderConsole();
   if(['running','stopping'].includes(state.experiment?.status))for(const b of document.querySelectorAll('.axes button,#groupmove,#armgroup,#pforward,#pback,#applygroup,#pconnect,#scan'))b.disabled=true;
@@ -179,9 +223,9 @@ async function refresh(){
   if(busy)return;busy=true;
   try{
     const response=await fetch('/api/state',{signal:AbortSignal.timeout(3000)});if(!response.ok)throw Error('HTTP '+response.status);state=await response.json();
-    $('#connection').innerHTML='<i></i>'+(state.owner&&state.owner!==client?'其他页面正在控制':'本地服务在线');$('#serverdot').className='dot online';render();
+    $('#connection span').textContent='本地服务在线';$('#connection i').className='dot online';$('#serverdot').className='dot online';render();
   }catch{
-    state=null;cameraPanel.render(null);sideCameraPanel.render(null);connectionWorker.postMessage({client,renewMotors:false});model.update(null,selected);for(let i=0;i<4;i++){$('#mstate'+i).textContent='反馈中断';$('#mspeed'+i).textContent=$('#mcurrent'+i).textContent='—';}for(let i=0;i<3;i++){$('#pos'+i).textContent='—';}$('#pstate').textContent='反馈中断';$('#connection').textContent='服务离线';$('#serverdot').className='dot fault';
+    state=null;cameraPanel.render(null);sideCameraPanel.render(null);renderCameraTopology();renderConsole();connectionWorker.postMessage({client,renewMotors:false});model.update(null,selected);for(let i=0;i<4;i++){$('#mstate'+i).textContent='反馈中断';$('#mspeed'+i).textContent=$('#mcurrent'+i).textContent='—';}for(let i=0;i<3;i++){$('#pos'+i).textContent='—';}$('#pstate').textContent='反馈中断';$('#connection span').textContent='服务离线';$('#connection i').className=$('#serverdot').className='dot fault';
     for(let i=0;i<3;i++){$('#status'+i).textContent='反馈中断';$('#status'+i).className='status error';$('#navdot'+i).className='dot fault';}
     for(const button of document.querySelectorAll('.axes button,.propcontrols button,.motorcard button,#applygroup,#runcommand,#armgroup,#groupmove,#pretestopen,#pretestpause,#pretestresume'))button.disabled=true;
   }finally{busy=false;}
@@ -195,10 +239,18 @@ showPage(window.location.hash==='#camera'?'camera':'overview');
 
 let localOutput='';
 function renderConsole(){
-  const e=state?.experiment;if(!e)return;
+  const e=state?.experiment;
+  const paused=e?.status==='running'&&e.pretest?.phase==='paused';
+  const inProgress=['running','stopping'].includes(e?.status);
+  const navLabel=!e?'服务离线':paused?'暂停':inProgress?'运行中':'空闲';
+  $('#navconsolestate').textContent=$('#summaryconsole').textContent=navLabel;
+  const signal=!e||e.status==='failed'?'fault':paused?'partial':inProgress?'online':'';
+  $('#consoledot').className='dot '+signal;
+  $('#scriptstate').className='status '+(signal==='fault'?'error':signal?'ready':'');
+  if(!e){$('#scriptstate').textContent=navLabel;return;}
   const names={idle:'空闲',running:'运行中',stopping:'停止中',completed:'已完成',failed:'执行失败',stopped:'已停止'};
-  $('#scriptstate').textContent=names[e.status]||e.status;
-  $('#runcommand').disabled=['running','stopping'].includes(e.status);
+  $('#scriptstate').textContent=paused?'暂停':names[e.status]||e.status;
+  $('#runcommand').disabled=inProgress;
   $('#pretestopen').disabled=$('#runcommand').disabled;
   const pretest=e.pretest, active=e.status==='running'&&!!pretest;
   $('#pretestpause').hidden=!active||pretest.phase==='paused';
@@ -223,7 +275,10 @@ function renderConsole(){
   if($('#consoleoutput').textContent!==text){$('#consoleoutput').textContent=text||'输入 help 查看指令。';$('#consoleoutput').scrollTop=$('#consoleoutput').scrollHeight;}
   $('#commands').innerHTML=['help','scripts',...e.scripts.map(s=>'python '+s),'stop','clear'].map(s=>`<option value="${escapeHtml(s)}">`).join('');
 }
-$('#pretestopen').onclick=()=>{cameraPanel.beginPretest();showPage('camera');};
+$('#pretestopen').onclick=()=>{
+  if($('#d405-card').hidden)showCameraMode('d405');
+  cameraPanel.beginPretest();showPage('camera');
+};
 $('#pretestpause').onclick=()=>act('pretest_pause');
 $('#pretestresume').onclick=()=>act('pretest_resume');
 $('#consoleform').onsubmit=async e=>{e.preventDefault();const c=$('#command').value.trim();if(!c)return;
@@ -235,4 +290,11 @@ $('#consoleform').onsubmit=async e=>{e.preventDefault();const c=$('#command').va
   renderConsole();
 };
 $('#stopscript').onclick=()=>act('script_stop');
+for(const button of document.querySelectorAll('[data-command]'))button.onclick=()=>{
+  if(page!=='console')showPage('console');
+  const input=$('#command');
+  input.value=button.dataset.command;
+  input.dispatchEvent(new Event('input'));
+  input.focus();
+};
 $('#command').oninput=()=>{$('#commandhint').textContent=$('#command').value.includes('motor_run')?'--motor 1–4 · --speed -1600…1600 · --seconds 0–60；会驱动已接入设备':'help · scripts · python scripts/name.py [参数] · stop · clear';};
