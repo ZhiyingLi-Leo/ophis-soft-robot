@@ -41,3 +41,19 @@
 .camerashapeview:has(canvas[hidden]){min-height:46px}
 .camerashape .panelnote{margin:8px 0 0}
 @media(max-width:640px){.camerashape{margin-inline:14px}}
+
+.side-camera{border-top:1px solid var(--line);margin-top:20px}
+.side-camera .cameraintro{justify-content:flex-start}
+.side-camera .cameraconnect{flex-wrap:wrap}
+.side-camera select{min-width:0;max-width:100%;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:6px;padding:8px}
+.side-camera .side-preview{aspect-ratio:16/9}
+#side-cropbox{position:absolute;border:2px solid #51d9ff;background:#51d9ff26;pointer-events:none}
+#side-placeholder{position:absolute;inset:0;display:grid;align-content:center;justify-items:center;gap:6px;color:var(--ink);font-size:13px}
+#side-placeholder[hidden]{display:none}
+#side-config{border:0;padding:0;margin:0;min-width:0}
+#side-config .commandrow,#side-config details{margin-top:10px}
+#side-config summary{cursor:pointer;font-size:13px}
+#side-config details .cameraform{margin-top:8px}
+.side-camera .camerametrics{grid-template-columns:repeat(3,minmax(0,1fr))}
+.side-camera .camerametrics small{display:block}
+@media(max-width:640px){.side-camera .camerametrics{grid-template-columns:1fr}.side-camera .cameraconnect{width:100%}}

@@ -1,5 +1,6 @@
 import { setupGamepad } from './gamepad.js';
 import { setupCamera } from './camera.js';
+import { setupSideCamera } from './side-camera.js';
 import { createScene } from './scene.js';
 const $ = selector => document.querySelector(selector);
 const colors = ['var(--ch1)', 'var(--ch2)', 'var(--ch3)'];
@@ -32,6 +33,7 @@ const cameraPanel=setupCamera(act,()=>{
   showPage('overview');
   $('#pretestopen').closest('.consolepanel').scrollIntoView({block:'start'});
 });
+const sideCameraPanel=setupSideCamera(act);
 setupGamepad(act,()=>state,client);
 $('#axes').innerHTML = Array.from({length:3}, (_,i) => `
   <article class="axis" id="axis${i}" style="--channel:${colors[i]}">
@@ -72,7 +74,7 @@ function showPage(name){
   for(const [id,key] of [['hydraulicpage','hydraulic'],['propsection','prop'],['camerasection','camera'],['overviewcards','overview']])$('#'+id).hidden=key!==name;
   for(const key of ['overview','hydraulic','prop','camera'])$('#nav'+key).classList.toggle('selected',key===name);
   $('.viewportpanel').hidden=name==='camera';
-  $('#pagetitle').textContent={overview:'系统总览',hydraulic:'液压驱动',prop:'滚轮推进器',camera:'深度视觉'}[name];
+  $('#pagetitle').textContent={overview:'系统总览',hydraulic:'液压驱动',prop:'滚轮推进器',camera:'相机'}[name];
   document.body.dataset.page=name;
   $('.channels').hidden=name==='prop';
   $('#selectedmodel').textContent=name==='prop'?'M1–M4 / 板端状态':`通道 0${selected+1} / ID ${state?.axes[selected].id??selected+1}`;
@@ -132,7 +134,8 @@ function render(){
   $('#notice').textContent='扫描后接入设备；重连不恢复运动。';
   $('#controlreason').textContent=state.stop_reason?'最近停机：'+state.stop_reason:'';
   $('#controlreason').hidden=!state.stop_reason;
-  $('#count').textContent=`${state.axes.filter(a=>a.online).length+(state.propulsion.online?1:0)+(state.camera.online?1:0)} / 5`;
+  const side=state.modules?.['camera.side_view']?.state;
+  $('#count').textContent=`${state.axes.filter(a=>a.online).length+Number(state.propulsion.online)+Number(state.camera.online)+Number(!!side?.online)} / 6`;
   for(let i=0;i<3;i++){
     const a=state.axes[i];
     $('#axis'+i).classList.toggle('selected',selected===i);$('#axisnav'+i).classList.toggle('selected',selected===i);
@@ -162,6 +165,9 @@ function render(){
   $('#summaryhydraulic').textContent=state.axes.map(a=>`ID ${a.id}: ${a.online&&!a.error?a.position.toFixed(3)+' mm':statusText(a)}`).join(' · ');
   $('#summaryprop').textContent=p.error?'板端故障':p.online?`${p.backend.toUpperCase()} · ${fresh?'四路遥测在线':'暂无四路遥测'}`:'未接入';
   cameraPanel.render(state);
+  sideCameraPanel.render(state);
+  const cameraFault=state.camera.error||side?.error;
+  $('#cameradot').className='dot '+(cameraFault?'fault':state.camera.online||side?.online?'online':'');
   renderDevices();
   renderConsole();
   if(['running','stopping'].includes(state.experiment?.status))for(const b of document.querySelectorAll('.axes button,#groupmove,#armgroup,#pforward,#pback,#applygroup,#pconnect,#scan'))b.disabled=true;
@@ -175,7 +181,7 @@ async function refresh(){
     const response=await fetch('/api/state',{signal:AbortSignal.timeout(3000)});if(!response.ok)throw Error('HTTP '+response.status);state=await response.json();
     $('#connection').innerHTML='<i></i>'+(state.owner&&state.owner!==client?'其他页面正在控制':'本地服务在线');$('#serverdot').className='dot online';render();
   }catch{
-    state=null;cameraPanel.render(null);connectionWorker.postMessage({client,renewMotors:false});model.update(null,selected);for(let i=0;i<4;i++){$('#mstate'+i).textContent='反馈中断';$('#mspeed'+i).textContent=$('#mcurrent'+i).textContent='—';}for(let i=0;i<3;i++){$('#pos'+i).textContent='—';}$('#pstate').textContent='反馈中断';$('#connection').textContent='服务离线';$('#serverdot').className='dot fault';
+    state=null;cameraPanel.render(null);sideCameraPanel.render(null);connectionWorker.postMessage({client,renewMotors:false});model.update(null,selected);for(let i=0;i<4;i++){$('#mstate'+i).textContent='反馈中断';$('#mspeed'+i).textContent=$('#mcurrent'+i).textContent='—';}for(let i=0;i<3;i++){$('#pos'+i).textContent='—';}$('#pstate').textContent='反馈中断';$('#connection').textContent='服务离线';$('#serverdot').className='dot fault';
     for(let i=0;i<3;i++){$('#status'+i).textContent='反馈中断';$('#status'+i).className='status error';$('#navdot'+i).className='dot fault';}
     for(const button of document.querySelectorAll('.axes button,.propcontrols button,.motorcard button,#applygroup,#runcommand,#armgroup,#groupmove,#pretestopen,#pretestpause,#pretestresume'))button.disabled=true;
   }finally{busy=false;}

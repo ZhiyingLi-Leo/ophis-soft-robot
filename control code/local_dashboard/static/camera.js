@@ -1,6 +1,50 @@
 import { createCameraShape } from './camera-shape.js';
 
 const $=selector=>document.querySelector(selector);
+export function installRoiDrag(image, box, {enabled, onSelection, onDrag=()=>{}}){
+  let drag=null;
+  const clamp=value=>Math.max(0,Math.min(1,value));
+  function coords(event, bounds){
+    return [clamp((event.clientX-bounds.left)/bounds.width),clamp((event.clientY-bounds.top)/bounds.height)];
+  }
+  function boundsFor(event){
+    const end=coords(event,drag.bounds), start=drag.start;
+    return [Math.min(start[0],end[0]),Math.min(start[1],end[1]),Math.max(start[0],end[0]),Math.max(start[1],end[1])];
+  }
+  image.onpointerdown=event=>{
+    if(!enabled()||drag||!image.naturalWidth||event.button!==0)return;
+    const {left,top,width,height}=image.getBoundingClientRect();
+    const scale=Math.min(width/image.naturalWidth,height/image.naturalHeight);
+    if(!(scale>0))return;
+    const w=image.naturalWidth*scale,h=image.naturalHeight*scale;
+    const bounds={left:left+(width-w)/2,top:top+(height-h)/2,width:w,height:h};
+    drag={id:event.pointerId,bounds,start:coords(event,bounds)};
+    image.setPointerCapture(event.pointerId);
+    onDrag(true);
+  };
+  image.onpointermove=event=>{
+    if(drag?.id!==event.pointerId)return;
+    const [x0,y0,x1,y1]=boundsFor(event), b=drag.bounds, container=image.parentElement;
+    const parent=container.getBoundingClientRect();
+    Object.assign(box.style,{left:`${b.left-parent.left-container.clientLeft+x0*b.width}px`,
+      top:`${b.top-parent.top-container.clientTop+y0*b.height}px`,
+      width:`${(x1-x0)*b.width}px`,height:`${(y1-y0)*b.height}px`});
+    box.hidden=false;
+  };
+  function clear(event){
+    if(drag?.id!==event.pointerId)return;
+    drag=null;box.hidden=true;onDrag(false);
+  }
+  image.onpointercancel=clear;
+  image.onlostpointercapture=clear;
+  image.onpointerup=event=>{
+    if(drag?.id!==event.pointerId)return;
+    const bounds=boundsFor(event), [x0,y0,x1,y1]=bounds;
+    clear(event);
+    if(enabled())onSelection(x1-x0>=.05&&y1-y0>=.05?bounds:null);
+  };
+}
+
 export function setupCamera(act, showProgress){
   let state=null,busy=false,lastFrame=null,imageUrl=null;
   let setup=false,applied=false,drawing=null,previewSettings=null,confirming=false,experimentRunning=false,axesReady=false;
@@ -50,45 +94,15 @@ export function setupCamera(act, showProgress){
     $('#pretestready').textContent=hint||'三维测量有效，请检查中心线和夹角后确认。';
     $('#pretestconfirm').disabled=!!hint||confirming||experimentRunning||state.recording||!!drawing;
   }
-  function imageBounds(){
-    const {left,top,width,height}=image.getBoundingClientRect();
-    const scale=Math.min(width/image.naturalWidth,height/image.naturalHeight);
-    const w=image.naturalWidth*scale,h=image.naturalHeight*scale;
-    return {left:left+(width-w)/2,top:top+(height-h)/2,width:w,height:h};
-  }
-  function coord(event, bounds){
-    const clamp=v=>Math.max(0,Math.min(1,v));
-    return [clamp((event.clientX-bounds.left)/bounds.width),clamp((event.clientY-bounds.top)/bounds.height)];
-  }
-  function selection(event){
-    const {start,bounds}=drawing;
-    const end=coord(event,bounds);
-    return [Math.min(start[0],end[0]),Math.min(start[1],end[1]),Math.max(start[0],end[0]),Math.max(start[1],end[1])];
-  }
-  image.onpointerdown=event=>{
-    if(!setup||experimentRunning||state?.recording||drawing||!image.naturalWidth||event.button!==0)return;
-    const bounds=imageBounds();
-    drawing={id:event.pointerId,bounds,start:coord(event,bounds)};
-    image.setPointerCapture(event.pointerId);renderPretest();
-  };
-  image.onpointermove=event=>{
-    if(drawing?.id!==event.pointerId)return;
-    const [x0,y0,x1,y1]=selection(event), b=drawing.bounds, parent=image.parentElement.getBoundingClientRect();
-    Object.assign(box.style,{left:`${b.left-parent.left+x0*b.width}px`,top:`${b.top-parent.top+y0*b.height}px`,
-      width:`${(x1-x0)*b.width}px`,height:`${(y1-y0)*b.height}px`});
-    box.hidden=false;
-  };
-  function clearDrag(){drawing=null;box.hidden=true;renderPretest();}
-  image.onpointercancel=clearDrag;
-  image.onlostpointercapture=clearDrag;
-  image.onpointerup=event=>{
-    if(drawing?.id!==event.pointerId)return;
-    const bounds=selection(event), [x0,y0,x1,y1]=bounds;
-    clearDrag();
-    if(x1-x0<.05||y1-y0<.05){$('#pretestready').textContent='区域宽高至少占画面的 5%，请重新拖框。';return;}
-    bounds.forEach((value,i)=>$('#'+roiIds[i]).value=(value*100).toFixed(2));
-    apply();
-  };
+  installRoiDrag(image, box, {
+    enabled:()=>setup&&!experimentRunning&&!state?.recording,
+    onDrag:active=>{drawing=active;renderPretest();},
+    onSelection:bounds=>{
+      if(!bounds){$('#pretestready').textContent='区域宽高至少占画面的 5%，请重新拖框。';return;}
+      bounds.forEach((value,i)=>$('#'+roiIds[i]).value=(value*100).toFixed(2));
+      apply();
+    }
+  });
   for(const b of document.querySelectorAll('[data-camera-command]'))b.onclick=()=>{
     $('#command').value=b.dataset.cameraCommand;$('#command').dispatchEvent(new Event('input'));$('#command').focus();
   };
@@ -136,8 +150,7 @@ export function setupCamera(act, showProgress){
     const fresh=c.online&&c.frame_age!==null&&c.frame_age<2;
     $('#cstatus').textContent=c.error?'故障':c.status;
     $('#cstatus').className='status '+(c.error?'error':fresh?'ready':'');
-    $('#cnavstatus').textContent=fresh?'在线':c.error?'故障':'未接入';
-    $('#cameradot').className='dot '+(c.error?'fault':fresh?'online':'');
+    $('#cnavstatus').textContent='D405 '+(fresh?'在线':c.error?'故障':'未接入');
     $('#cconnect').textContent=c.online||['连接中','等待首帧'].includes(c.status)?'断开 D405':'接入 D405';
     $('#cconnect').disabled=running||c.status==='正在断开';$('#capply').disabled=running||c.recording;
     $('#crecord').disabled=running||!fresh||c.recording;$('#crecordstop').disabled=running||!c.recording;

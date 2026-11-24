@@ -24,11 +24,16 @@ def read_plan(path, limits, max_total):
     return rows,pairs
 
 
+def require_stream(camera, *, recording=False, name='相机'):
+    if not camera or not camera['online'] or camera['error'] or camera['frame_age'] is None or camera['frame_age'] > 1:
+        raise RuntimeError((camera or {}).get('error') or f'{name}图像失效')
+    if recording and (not camera['recording'] or camera['record_error']):
+        raise RuntimeError(camera['record_error'] or f'{name}记录已中断')
+    return camera
+
+
 def require_camera(state, recording=False, shape=False):
-    c=state['camera']
-    if not c['online'] or c['error'] or c['frame_age'] is None or c['frame_age']>1:
-        raise RuntimeError(c['error'] or '相机图像失效')
-    if recording and (not c['recording'] or c['record_error']):raise RuntimeError(c['record_error'] or '相机记录已中断')
+    c = require_stream(state['camera'], recording=recording)
     m=c.get('measurement') or {}
     if shape and (not m.get('valid') or m.get('depth_fraction',0)<.8 or m.get('surface_theta_deg') is None):
         raise RuntimeError('柔性段轮廓或深度不足；停止采样运动')

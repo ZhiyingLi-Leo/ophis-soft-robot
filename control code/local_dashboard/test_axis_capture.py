@@ -77,6 +77,71 @@ class CaptureRobot:
         self.path = None
 
 
+class DualCaptureRobot(CaptureRobot):
+    def __init__(self, directory, fault=''):
+        super().__init__(directory)
+        self.fault = fault
+        self.side_frames = []
+        self.phase = ''
+        self.settings = {'roi':[.1,.15,.9,.85]}
+
+    def measurement(self):
+        if self.phase in ('T0','target_hold'):
+            return dict(shape_3d=dict(valid=False,angle_deg=None,reason='downward bend'))
+        return super().measurement()
+
+    def state(self):
+        state = super().state()
+        active = bool(self.path and self.phase in ('T0','target_hold'))
+        if active and self.fault == 'd405-stall':
+            state['camera']['frame_age'] = 1.1
+        if active and self.fault == 'axis-feedback':
+            state['axes'][2]['age'] = 1.1
+        side = dict(online=not (active and self.fault == 'side-disconnect'), error='', frame_age=.1,
+                    settings=self.settings, measurement_settings=self.settings,
+                    recording=bool(self.path), finalizing=False, recorded_frames=len(self.side_frames),
+                    valid_recorded_frames=sum(frame['measurement']['valid'] for frame in self.side_frames),
+                    record_error='disk error' if active and self.fault=='writer-error' else '',
+                    measurement=self.side_measurement())
+        if active and self.fault == 'side-stall':
+            side['frame_age'] = 1.1
+        if active and self.fault == 'settings':
+            side['settings'] = {'roi':[0.,0.,1.,1.]}
+        state['modules'] = {'camera.side_view':{'state':side}}
+        return state
+
+    def side_measurement(self):
+        active = self.phase in ('T0','target_hold')
+        valid = self.fault != 'reference' and not (self.fault=='side-contour' and active)
+        return dict(valid=valid,angle_deg=12*self.axes[2]['position'] if valid else None)
+
+    def axis_record_start(self,label,group):
+        result = self.device('camera.d405','record_start',label=label,group=group)
+        self.side_frames = []
+        self.phase = ''
+        (self.path/'side_view').mkdir()
+        return result
+
+    def annotate(self, **note):
+        self.phase = note['kind']
+        super().annotate(**note)
+
+    def wait(self,seconds):
+        count = len(self.records)
+        super().wait(seconds)
+        if self.fault=='writer-stall' and self.phase in ('T0','target_hold'):
+            return
+        for frame in self.records[count:]:
+            self.side_frames.append(dict(kind='frame',measurement=self.side_measurement(),
+                                         host_receive_monotonic=frame['host_receive_monotonic']+.025))
+
+    def axis_record_stop(self):
+        index = self.path/'side_view'/'frames.jsonl'
+        end = dict(kind='end',frames=len(self.side_frames))
+        index.write_text(''.join(json.dumps(record)+'\n' for record in [*self.side_frames,end]))
+        self.record_stop()
+
+
 class AxisCaptureTests(unittest.TestCase):
     def test_first_segment_has_15_rounds_with_fixed_recording_windows(self):
         with tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
@@ -108,8 +173,51 @@ class AxisCaptureTests(unittest.TestCase):
                 self.assertEqual(tuple(robot.armed), ids)
                 self.assertEqual(robot.moves, [(ids, tuple(point[i - 1] for i in ids)), (ids, (0,) * len(ids))] * 3)
 
+    def test_dual_id3_completes_through_d405_and_side_contour_loss(self):
+        for fault in ('','side-contour'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
+                robot = DualCaptureRobot(Path(tmp),fault)
+                batch = AxisCapture(robot,(3,),[(0,0,2)],2,side_view=True)
+                with patch('axis_capture.time.monotonic',side_effect=lambda:robot.now):
+                    batch.run()
+                self.assertEqual(robot.moves,[((3,),(2,)),((3,),(0,))]*3)
+                for entry in batch.batch['completed_rounds']:
+                    info = json.loads((Path(tmp)/batch.group/entry['path']/'round.json').read_text())
+                    self.assertEqual(info['valid_hold_angles'],0)
+                    self.assertGreater(info['side_view']['hold_frames'],0)
+                    self.assertEqual(info['side_view']['valid_hold_angles']>0,not fault)
+                self.assertTrue(all(not axis['armed'] for axis in robot.axes))
+
+    def test_dual_faults_stop_and_keep_incomplete_round(self):
+        faults = {'d405-stall':'图像失效','side-stall':'侧视相机图像失效','side-disconnect':'侧视相机图像失效',
+                  'writer-error':'disk error','writer-stall':'记录帧停止写入',
+                  'settings':'侧视 ROI','axis-feedback':'ID3 反馈'}
+        for fault,message in faults.items():
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
+                robot=DualCaptureRobot(Path(tmp),fault)
+                batch=AxisCapture(robot,(3,),[(0,0,2)],2,side_view=True)
+                with patch('axis_capture.time.monotonic',side_effect=lambda:robot.now):
+                    with self.assertRaisesRegex(RuntimeError,message):
+                        batch.run()
+                self.assertFalse(batch.batch['completed_rounds'])
+                self.assertEqual(robot.moves,[((3,),(2,))])
+                self.assertTrue(all(not axis['armed'] for axis in robot.axes))
+                path, = (Path(tmp)/batch.group).glob('*/round.json')
+                self.assertEqual(json.loads(path.read_text())['status'],'incomplete')
+
+    def test_capture_requires_side_reference_and_legacy_keeps_3d_rule(self):
+        for side,fault,message in [(True,'reference','侧视参考角'),(False,'','三维角持续丢失')]:
+            with self.subTest(side=side), tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
+                robot=DualCaptureRobot(Path(tmp),fault)
+                batch=AxisCapture(robot,(3,),[(0,0,2)],2,side_view=side)
+                with patch('axis_capture.time.monotonic',side_effect=lambda:robot.now):
+                    with self.assertRaisesRegex(RuntimeError,message):
+                        batch.run()
+                self.assertEqual(bool(robot.moves),not side)
+                self.assertFalse(batch.batch['completed_rounds'])
+
     def test_preview_never_opens_control_session(self):
-        args = ['collect_dual.py', '--ids', '1', '3', '--stop-mm', '4']
+        args = ['collect_dual.py', '--ids', '1', '3', '--stop-mm', '4', '--side-view']
         with patch('sys.argv', args), patch('axis_capture.Robot') as robot, redirect_stdout(io.StringIO()) as out:
             main(2)
         self.assertIn('共 12 轮', out.getvalue())

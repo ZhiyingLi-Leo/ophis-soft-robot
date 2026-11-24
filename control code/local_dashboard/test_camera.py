@@ -41,7 +41,7 @@ class PluginTests(unittest.TestCase):
     def test_registry_and_missing_camera_do_not_block_cylinders(self):
         engine=Engine(CONFIG,testing=True)
         try:
-            self.assertEqual(set(engine.state()['modules']),{'cylinder.1','cylinder.2','cylinder.3','propulsion','camera.d405'})
+            self.assertEqual(set(engine.state()['modules']),{'cylinder.1','cylinder.2','cylinder.3','propulsion','camera.d405','camera.side_view'})
             def command(key,op,**arguments):return engine.action(dict(action='device',client='test',device=key,operation=op,arguments=arguments))
             command('cylinder.2','connect');command('cylinder.2','arm')
             with patch('device_plugins.realsense.dependencies',return_value={'pyrealsense2':False}):
@@ -57,7 +57,7 @@ class PluginTests(unittest.TestCase):
     def test_script_cannot_reconfigure_or_connect_devices(self):
         engine=Engine(CONFIG,testing=True)
         try:
-            for name in ('camera.d405','cylinder.1'):
+            for name in ('camera.d405','camera.side_view','cylinder.1'):
                 with self.assertRaisesRegex(ValueError,'连接与配置'):
                     engine.action(dict(action='device',device=name,operation='connect',client='test',_script=True))
             self.assertFalse(any(a['online'] for a in engine.axes))

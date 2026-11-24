@@ -20,6 +20,7 @@ from experiments import Experiments
 from pretest_data import shape_angle
 from device_plugins import DeviceRegistry, CylinderDevice, PropulsionDevice
 from device_plugins.realsense import D405Device
+from device_plugins.uvc import SideViewDevice
 
 ROOT = Path(__file__).resolve().parent
 
@@ -128,7 +129,9 @@ class Engine:
         self.prop.update(targets=[0]*4, deadlines=[0.]*4)
         self._telemetry_cache=dict(valid=False,reason='no feedback yet',host_monotonic=time.monotonic())
         self.camera=D405Device(ROOT/'data',self.telemetry_snapshot)
-        self.plugins=DeviceRegistry([*(CylinderDevice(self,i) for i in range(3)),PropulsionDevice(self),self.camera])
+        self.side_view = SideViewDevice(self.telemetry_snapshot)
+        self.plugins=DeviceRegistry([*(CylinderDevice(self,i) for i in range(3)),PropulsionDevice(self),
+                                     self.camera,self.side_view])
         self.experiment=Experiments(self)
         self.buses = {}; self.axis_ports = {}; self.prop_serial = None
         self.devices = []; self.events = []; self.owner = None; self.heartbeat = 0
@@ -189,6 +192,7 @@ class Engine:
         self.stop_reason=reason
         for i in range(3): self.stop_axis(i)
         self.stop_prop()
+        self.side_view.stop_recording(reason)
         self.camera.stop_recording(reason)
 
     def disconnect(self):
@@ -273,6 +277,33 @@ class Engine:
             self.owner = None
             self.log('浏览器心跳失效：停止并撤销启用')
 
+    def claim_control(self, client):
+        if not client or len(client) > 100: raise ValueError('缺少控制会话')
+        if self.owner and self.owner != client and time.monotonic()-self.heartbeat_time() < 1.5:
+            raise ValueError('另一个浏览器正在控制；请先关闭其页面')
+        if self.owner != client: self.stop(); self.owner = client
+        self.heartbeat = time.monotonic()
+
+    @staticmethod
+    def is_side_autolocate(body):
+        return (body.get('action'), body.get('device'), body.get('operation')) == (
+            'device', 'camera.side_view', 'auto_locate')
+
+    def auto_locate_side(self, body):
+        client = str(body.get('client',''))
+        with self.lock:
+            if body.get('_script'):
+                raise ValueError('侧视自动定位请在页面完成')
+            self.claim_control(client)
+            if self.experiment.process is not None:
+                raise ValueError('请先停止实验再自动定位')
+        candidate = self.side_view.roi_candidate()
+        with self.lock:
+            if (self.owner != client or time.monotonic()-self.heartbeat_time() > 1.5
+                    or self.experiment.process is not None):
+                raise ValueError('控制会话或实验状态已变化，请重新自动定位')
+            return self.side_view.apply_auto_roi(candidate)
+
     def action(self, body):
         if body.get('action')=='heartbeat':
             client=str(body.get('client',''))
@@ -281,15 +312,13 @@ class Engine:
                 self.heartbeat_seen=(client,time.monotonic())
                 self.heartbeat_count+=1
             return dict(ok=True,accepted=accepted,owner=self.owner)
+        if self.is_side_autolocate(body):
+            return self.auto_locate_side(body)
         with self.lock:
             op = body.get('action'); client = str(body.get('client', ''))
             if op == 'stop_all': self.experiment.cancel(); self.stop('全部停止按钮 / Esc'); return
             if op == 'automatic_stop': return  # Older pages must not stop on focus changes.
-            if not client or len(client) > 100: raise ValueError('缺少控制会话')
-            if self.owner and self.owner != client and time.monotonic()-self.heartbeat_time() < 1.5:
-                raise ValueError('另一个浏览器正在控制；请先关闭其页面')
-            if self.owner != client: self.stop(); self.owner = client
-            self.heartbeat = time.monotonic()
+            self.claim_control(client)
             if op == 'script_stop': self.experiment.cancel(); self.stop(); return
             if op == 'script_clear':
                 if self.experiment.process: raise ValueError('请先停止实验再清空输出')
@@ -319,9 +348,32 @@ class Engine:
                 return self.experiment.pretest_progress(body['progress'],begin_round=body.get('begin_round') is True)
             if self.experiment.process is not None and not body.get('_script'):
                 raise ValueError('实验运行中，请先停止实验再手动控制')
+            if op in ('axis_record_start', 'axis_record_stop'):
+                if not body.get('_script'):
+                    raise ValueError('双机记录仅由实验脚本控制')
+                if op == 'axis_record_start':
+                    side = self.side_view.snapshot()
+                    if side['recording'] or side['finalizing']:
+                        raise ValueError('侧视记录尚未结束')
+                    result = self.camera.record_start(body.get('label', ''), body.get('group'))
+                    try:
+                        self.side_view.record_start(result['session_path'])
+                    except Exception:
+                        self.camera.stop_recording('侧视记录启动失败')
+                        raise
+                    return result
+                side, overhead = self.side_view.snapshot(), self.camera.snapshot()
+                self.side_view.stop_recording('本轮结束')
+                self.camera.stop_recording('本轮结束')
+                for stream in (side, overhead):
+                    if stream['record_error']:
+                        return {'error': stream['record_error']}
+                    if not stream['recording'] or not stream['online'] or stream['frame_age'] is None or stream['frame_age'] > 1:
+                        return {'error': stream['error'] or '双机记录提前中断'}
+                return {'error': ''}
             if op == 'device':
                 operation=body.get('operation')
-                if body.get('_script') and operation in ('connect','disconnect','configure'):
+                if body.get('_script') and operation in ('connect','disconnect','configure','auto_locate'):
                     raise ValueError('实验脚本使用已接入设备；连接与配置请在页面完成')
                 return self.plugins.command(body.get('device'),operation,body.get('arguments',{}),
                                             dict(client=client,_script=bool(body.get('_script'))))
@@ -588,6 +640,7 @@ class Engine:
     def close(self):
         self.running = False
         with self.lock: self.experiment.cancel(); self.disconnect()
+        self.side_view.close()
         self.camera.close()
 
 class Handler(BaseHTTPRequestHandler):
@@ -608,15 +661,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.trusted(): self.send(403, {'error':'仅允许本机同源请求'}); return
         if self.path == '/api/state': self.send(200, self.server.engine.state()); return
-        if self.path == '/api/camera/preview':
-            preview=self.server.engine.camera.preview(with_settings=True)
+        if self.path == '/api/camera/side-view/devices':
+            try:
+                self.send(200, self.server.engine.side_view.discover())
+            except (ValueError, RuntimeError) as error:
+                self.send(503, {'error': str(error)})
+            return
+        if self.path in ('/api/camera/preview', '/api/camera/side-view/preview'):
+            engine = self.server.engine
+            camera = engine.side_view if self.path.endswith('/side-view/preview') else engine.camera
+            preview=camera.preview(with_settings=True)
             if preview is None:self.send(404, {'error':'相机没有新鲜图像'})
             else:
                 jpeg, settings = preview
                 self.send(200,jpeg,'image/jpeg',{'X-Camera-Settings':json.dumps(settings)})
             return
         files = {'/':('index.html','text/html'), '/app.js':('app.js','text/javascript'),
-                 '/connection-worker.js':('connection-worker.js','text/javascript'), '/scene.js':('scene.js','text/javascript'), '/camera.js':('camera.js','text/javascript'), '/camera-shape.js':('camera-shape.js','text/javascript'), '/gamepad.js':('gamepad.js','text/javascript'), '/style.css':('style.css','text/css')}
+                 '/connection-worker.js':('connection-worker.js','text/javascript'), '/scene.js':('scene.js','text/javascript'), '/camera.js':('camera.js','text/javascript'), '/side-camera.js':('side-camera.js','text/javascript'), '/camera-shape.js':('camera-shape.js','text/javascript'), '/gamepad.js':('gamepad.js','text/javascript'), '/style.css':('style.css','text/css')}
         vendors = ('three.module.js', 'GLTFLoader.js', 'OrbitControls.js', 'BufferGeometryUtils.js', 'RoomEnvironment.js')
         for name in vendors: files['/vendor/'+name] = ('vendor/'+name, 'text/javascript')
         models = {'/models/cylinders.glb':'Triple_Cylinder_Syringes_V3.glb', '/models/advancer.glb':'Advancer_Assembly.glb', '/models/d405-stand.glb':'D405_Stand_H300.glb'}
@@ -643,13 +704,16 @@ class Handler(BaseHTTPRequestHandler):
                             engine.action(dict(action='motor_renew',client=body['client']))
                 if body.get('wait') is True: time.sleep(.1)
                 self.send(200, result); return
+            if self.path == '/api/action' and engine.is_side_autolocate(body):
+                self.send(200, {'ok':True,'result':engine.action(body)})
+                return
             with engine.lock:
                 if self.path == '/api/script':
                     import secrets
                     token=self.headers.get('X-Experiment-Token','')
                     if not engine.experiment.token or not secrets.compare_digest(token,engine.experiment.token): raise ValueError('实验已结束或凭证无效')
                     if time.monotonic()-engine.heartbeat_time() > 1.5: raise ValueError('浏览器已失联')
-                    if body.get('action') not in ('motor','motor_stop','motor_renew','propulsion','stop_prop','arm','move','move_group','jog','stop_axis','stop_all','device','pretest_progress'):
+                    if body.get('action') not in ('motor','motor_stop','motor_renew','propulsion','stop_prop','arm','move','move_group','jog','stop_axis','stop_all','device','pretest_progress','axis_record_start','axis_record_stop'):
                         raise ValueError('脚本不支持此操作')
                     body.update(client=engine.experiment.client,_script=True)
                     last_heartbeat=engine.heartbeat

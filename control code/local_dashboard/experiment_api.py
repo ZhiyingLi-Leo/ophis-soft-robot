@@ -56,6 +56,23 @@ class Robot:
 
     def device(self, name, operation, **arguments):
         return self.command('device',device=name,operation=operation,arguments=arguments).get('result')
+    def axis_record_start(self, label, group):
+        return self.command('axis_record_start', label=label, group=group)['result']
+
+    def axis_record_stop(self):
+        result = self.command('axis_record_stop')['result']
+        deadline = time.monotonic() + 4
+        while True:
+            camera = self.state()['modules']['camera.side_view']['state']
+            if not camera['finalizing']:
+                error = result['error'] or camera['record_error']
+                if error:
+                    raise RuntimeError(error)
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError('侧视记录未能及时结束')
+            self.wait(.06)
+
     def camera_state(self): return self.state()['camera']
     def record_start(self, label=''): return self.device('camera.d405','record_start',label=label)
     def record_stop(self): return self.device('camera.d405','record_stop')

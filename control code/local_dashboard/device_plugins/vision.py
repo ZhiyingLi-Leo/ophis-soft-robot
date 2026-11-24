@@ -29,14 +29,22 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
     h,w=color.shape[:2]
     roi=settings['roi']
     x0,y0,x1,y1=[int(v*n) for v,n in zip(roi,[w,h,w,h])]
-    hsv=cv2.cvtColor(color,cv2.COLOR_BGR2HSV)
-    orange=cv2.inRange(hsv,np.array([3,85,55]),np.array([27,255,255]))
-    green=cv2.inRange(hsv,np.array([32,55,30]),np.array([95,255,255]))
-    white=cv2.inRange(hsv,np.array([0,0,settings['white_min']]),np.array([179,settings['white_sat'],255]))
+    x1,y1=max(x0+1,x1),max(y0+1,y1)
+    hsv=cv2.cvtColor(color[y0:y1,x0:x1],cv2.COLOR_BGR2HSV)
+    orange=np.zeros((h,w),np.uint8)
+    orange[y0:y1,x0:x1]=cv2.inRange(hsv,np.array(settings.get('orange_min',[3,85,55])),
+                                      np.array(settings.get('orange_max',[27,255,255])))
+    white=np.zeros((h,w),np.uint8)
+    white[y0:y1,x0:x1]=cv2.inRange(hsv,np.array([0,0,settings['white_min']]),
+                                     np.array([179,settings['white_sat'],255]))
+    if 'orange_min' in settings:
+        white[orange>0]=0
     allowed=np.zeros((h,w),np.uint8);allowed[y0:y1,x0:x1]=255
     orange &= allowed; white &= allowed
     kernel=np.ones((3,3),np.uint8)
     white=cv2.morphologyEx(white,cv2.MORPH_CLOSE,kernel)
+    if 'orange_min' in settings:
+        white &= allowed
     result=dict(valid=False, reason='未识别到橙色近端与白色柔性段', curve_px=[],
                 projected_theta_deg=None, projected_signed_deg=None, depth_fraction=0., surface_theta_deg=None,
                 surface_curve_camera_mm=[], coordinate_frame='camera',
@@ -55,8 +63,9 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
         if distance<=max(12,w*.04):candidates.append((distance,-stats[label,cv2.CC_STAT_AREA],label))
     if not candidates: return result,overlay
     label=min(candidates)[2]; mask=(labels==label).astype(np.uint8)*255
-    skeleton=thin(mask)
-    yy,xx=np.nonzero(skeleton);points=set(zip(xx.tolist(),yy.tolist()))
+    x,y,width,height=stats[label,:4]
+    skeleton=thin(mask[y:y+height,x:x+width])
+    yy,xx=np.nonzero(skeleton);points=set(zip((xx+x).tolist(),(yy+y).tolist()))
     if len(points)<8:return result,overlay
     root=min(points,key=lambda p:float(distances[p[1],p[0]]))
     queue=deque([root]);parent={root:None};distance={root:0}
@@ -94,7 +103,22 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
                   projected_theta_deg=projected, projected_signed_deg=signed)
     cv2.circle(overlay,tuple(curve[0].astype(int)),4,(255,100,0),-1)
     cv2.circle(overlay,tuple(curve[-1].astype(int)),4,(0,0,255),-1)
-    if depth_mm is None:return result,overlay
+    if depth_mm is None:
+        if 'orange_min' in settings:
+            _,_,orange_stats,_=cv2.connectedComponentsWithStats(orange)
+            root=np.asarray(curve[0])
+            local=[]
+            for index, (ox,oy,ow,oh,area) in enumerate(orange_stats[1:],1):
+                if area<10:continue
+                nearest=np.clip(root,[ox,oy],[ox+ow-1,oy+oh-1])
+                local.append((float(np.linalg.norm(root-nearest)),-area,index))
+            if local:
+                ox,oy,ow,oh=orange_stats[min(local)[2],:4]
+                result['catheter_bounds_px']=[int(v) for v in
+                    (min(x,ox),min(y,oy),max(x+width,ox+ow),max(y+height,oy+oh))]
+        return result,overlay
+    green=np.zeros((h,w),np.uint8)
+    green[y0:y1,x0:x1]=cv2.inRange(hsv,np.array([32,55,30]),np.array([95,255,255]))
     depths=[]
     for x,y in curve.astype(int):
         window=depth_mm[max(0,y-1):min(h,y+2),max(0,x-1):min(w,x+2)]
@@ -109,3 +133,28 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
     if deproject is not None:
         result['shape_3d']=reconstruction(depth_mm,orange,mask,green & allowed,curve,deproject,settings)
     return result,overlay
+
+
+def analyze_rgb(color, settings):
+    measured, overlay = analyze(color, None, settings)
+    angle = measured['projected_signed_deg']
+    result = dict(valid=angle is not None, angle_deg=angle, curve_px=measured['curve_px'],
+                  reason='' if angle is not None else measured['reason'])
+    if 'catheter_bounds_px' in measured:
+        result['catheter_bounds_px'] = measured['catheter_bounds_px']
+    return result, overlay
+
+
+def locate_rgb_roi(color, settings):
+    measured, _ = analyze_rgb(color, dict(settings, roi=[0., 0., 1., 1.]))
+    bounds = measured.get('catheter_bounds_px')
+    if not measured['valid'] or not bounds:
+        raise ValueError('未找到导管，请确认完整橙色近端与白色柔性段可见并调整颜色阈值')
+    height, width = color.shape[:2]
+    x0, y0, x1, y1 = bounds
+    span = max(x1-x0, y1-y0)
+    # Leave room for motion in both directions, including a nearly straight reference.
+    pad_x = max(.06, .4*span/width)
+    pad_y = max(.15, .85*span/height)
+    return [max(0., x0/width-pad_x), max(0., y0/height-pad_y),
+            min(1., x1/width+pad_x), min(1., y1/height+pad_y)]

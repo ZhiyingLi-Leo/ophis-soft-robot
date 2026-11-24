@@ -9,8 +9,8 @@ from pathlib import Path
 from statistics import median
 
 from experiment_api import Robot
-from pretest_data import frame_angle, read_capture, save_json, shape_angle, summarize
-from sampling import ArrivalWindow, axes_by_id, positions_at_target, require_camera
+from pretest_data import frame_angle, read_capture, read_side_capture, save_json, shape_angle, side_angle, summarize
+from sampling import ArrivalWindow, axes_by_id, positions_at_target, require_camera, require_stream
 
 REFERENCE = (0, 0, 0)
 REPEATS = 3
@@ -22,9 +22,10 @@ SPEED = .5
 
 
 class AxisCapture:
-    def __init__(self, robot, ids, points, max_advance):
+    def __init__(self, robot, ids, points, max_advance, *, side_view=False):
         self.robot = robot
         self.ids = ids
+        self.side_view = side_view
         self.group = 'axis_capture_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         self.batch = dict(ids=ids, points_mm=points, repeats=REPEATS, reference_mm=REFERENCE,
                           max_advance_mm=max_advance, reference_seconds=REFERENCE_SECONDS,
@@ -36,9 +37,21 @@ class AxisCapture:
         axes = axes_by_id(state)
         if camera['settings'] != self.settings or camera['measurement_settings'] != self.settings:
             raise RuntimeError('相机识别参数已变化')
-        angle = shape_angle(camera.get('measurement'))
         now = time.monotonic()
-        if angle is not None:
+        side = None
+        if self.side_view:
+            side = self.side_camera(state, recording=recording)
+            if side['settings'] != self.side_settings or side['measurement_settings'] != self.side_settings:
+                raise RuntimeError('侧视 ROI 或颜色阈值已变化')
+            if recording:
+                for name, stream in [('D405', camera), ('侧视', side)]:
+                    previous_count, previous_time = self.record_progress[name]
+                    count = stream['recorded_frames']
+                    if count != previous_count:
+                        self.record_progress[name] = (count, now)
+                    elif now-previous_time > 1:
+                        raise RuntimeError(f'{name}记录帧停止写入')
+        elif shape_angle(camera.get('measurement')) is not None:
             self.last_valid = now
         elif now - self.last_valid > 1:
             reason = ((camera.get('measurement') or {}).get('shape_3d') or {}).get('reason', '')
@@ -53,7 +66,12 @@ class AxisCapture:
                 raise RuntimeError(f'ID{axis_id} 的启用或运动状态发生变化')
             if not -POSITION_TOLERANCE <= axis['position'] <= upper + POSITION_TOLERANCE:
                 raise RuntimeError(f'ID{axis_id} 的实际位置超出本轮位移范围')
-        return axes, camera
+        return axes, camera, side
+
+    @staticmethod
+    def side_camera(state, *, recording=False):
+        module = state.get('modules', {}).get('camera.side_view', {})
+        return require_stream(module.get('state'), recording=recording, name='侧视相机')
 
     def move(self, destination):
         if len(self.ids) == 1:
@@ -69,7 +87,7 @@ class AxisCapture:
         deadline = time.monotonic() + timeout
         window = ArrivalWindow(destination, POSITION_TOLERANCE)
         while time.monotonic() < deadline:
-            axes, _ = self.feedback(target, armed=True, recording=True)
+            axes, _, _ = self.feedback(target, armed=True, recording=True)
             if window.update(axes):
                 return
             self.robot.wait(.08)
@@ -78,7 +96,7 @@ class AxisCapture:
     def hold(self, destination, target, seconds):
         deadline = time.monotonic() + seconds
         while True:
-            axes, _ = self.feedback(target, armed=True, recording=True)
+            axes, _, _ = self.feedback(target, armed=True, recording=True)
             if not positions_at_target(axes, destination, POSITION_TOLERANCE):
                 raise RuntimeError(f'在 {destination} 保持期间，实际位置发生偏移')
             remaining = deadline - time.monotonic()
@@ -89,9 +107,12 @@ class AxisCapture:
     def wait_first_frame(self):
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
-            _, camera = self.feedback(REFERENCE, armed=True, recording=True)
-            if camera['recorded_frames'] and shape_angle(camera.get('measurement')) is not None:
-                return
+            _, camera, side = self.feedback(REFERENCE, armed=True, recording=True)
+            if camera['recorded_frames']:
+                if self.side_view and side['valid_recorded_frames'] and side_angle(side.get('measurement')) is not None:
+                    return
+                if not self.side_view and shape_angle(camera.get('measurement')) is not None:
+                    return
             self.robot.wait(.06)
         raise RuntimeError('参考位未收到有效画面或未写入原始帧')
 
@@ -105,7 +126,13 @@ class AxisCapture:
 
     def capture_round(self, point, repeat, target):
         label = f'point_{point:03d}_repeat_{repeat}'
-        result = self.robot.device('camera.d405', 'record_start', label=label, group=self.group)
+        if self.side_view:
+            result = self.robot.axis_record_start(label, self.group)
+            self.record_progress = {name:(0, time.monotonic()) for name in ('D405', '侧视')}
+            stop_recording = self.robot.axis_record_stop
+        else:
+            result = self.robot.device('camera.d405', 'record_start', label=label, group=self.group)
+            stop_recording = self.robot.record_stop
         path = Path(result['session_path'])
         round_info = dict(status='incomplete', point=point, repeat=repeat, ids=self.ids, target_mm=target,
                           reference_mm=REFERENCE)
@@ -115,6 +142,10 @@ class AxisCapture:
             self.wait_first_frame()
             self.robot.annotate(kind='reference_hold')
             self.hold(REFERENCE, REFERENCE, REFERENCE_SECONDS)
+            if self.side_view:
+                _, _, side = self.feedback(REFERENCE, armed=True, recording=True)
+                if side_angle(side.get('measurement')) is None:
+                    raise RuntimeError('T0 前侧视参考角无效')
             self.robot.annotate(kind='T0', point=point, repeat=repeat, target=target)
             self.move(target)
             self.wait_arrival(target, target)
@@ -127,15 +158,29 @@ class AxisCapture:
             self.robot.annotate(kind='T2')
         except BaseException:
             self.stop()
+            try:
+                stop_recording()
+            except Exception as error:
+                print(f'记录结束异常：{error}', flush=True)
             raise
-        finally:
-            self.robot.record_stop()
+        else:
+            stop_recording()
 
         frames, events = read_capture(path)
         reference_frames = [f for f in frames if events['reference_hold'] <= f['host_receive_monotonic'] < events['T0']]
         hold_frames = [f for f in frames if events['target_hold'] <= f['host_receive_monotonic'] < events['return']]
         if not reference_frames or not hold_frames:
             raise RuntimeError(f'参考段或目标停留段缺少原始帧：{path}')
+        if self.side_view:
+            side_frames = read_side_capture(path)
+            side_reference = [f for f in side_frames if events['reference_hold'] <= f['host_receive_monotonic'] < events['T0']]
+            side_hold = [f for f in side_frames if events['target_hold'] <= f['host_receive_monotonic'] < events['return']]
+            if not side_reference or not side_hold:
+                raise RuntimeError(f'侧视参考段或目标停留段缺少原始帧：{path}')
+            round_info['side_view'] = dict(frame_count=len(side_frames), reference_frames=len(side_reference),
+                hold_frames=len(side_hold),
+                valid_reference_angles=sum(side_angle(f['measurement']) is not None for f in side_reference),
+                valid_hold_angles=sum(side_angle(f['measurement']) is not None for f in side_hold))
         reference = [angle for f in reference_frames if (angle := frame_angle(f)) is not None]
         held = [angle for f in hold_frames if (angle := frame_angle(f)) is not None]
         round_info.update(status='complete', events_monotonic_s=events, frame_count=len(frames),
@@ -156,11 +201,16 @@ class AxisCapture:
     def run(self):
         state = self.robot.state()
         camera = require_camera(state)
-        if camera['recording'] or shape_angle(camera.get('measurement')) is None:
+        if camera['recording'] or (not self.side_view and shape_angle(camera.get('measurement')) is None):
             raise RuntimeError('请先结束现有录制，并在相机页确认三维识别有效')
+        if self.side_view:
+            side = self.side_camera(state)
+            if side['recording'] or side['finalizing'] or side_angle(side.get('measurement')) is None:
+                raise RuntimeError('请先结束侧视记录，并在相机页确认侧视参考角有效')
+            self.side_settings = side['settings']
         self.settings = camera['settings']
         self.last_valid = time.monotonic()
-        axes, _ = self.feedback(REFERENCE, armed=False)
+        axes, _, _ = self.feedback(REFERENCE, armed=False)
         self.slot_ids = [axis['id'] for axis in state['axes']]
         self.slots = [self.slot_ids.index(axis_id) + 1 for axis_id in self.ids]
         for axis, max_target in zip(axes, (max(values) for values in zip(*self.batch['points_mm']))):
@@ -193,6 +243,7 @@ def main(channels):
     parser.add_argument('--stop-mm', type=int, required=True, help='本段最后一个目标')
     parser.add_argument('--step-mm', type=int, default=1 if channels == 1 else 2)
     parser.add_argument('--max-advance-mm', type=float, help='现场确认的选中各轴总推进量上限')
+    parser.add_argument('--side-view', action='store_true', help='同步记录 D405 和已接入的侧视 RGB 相机')
     parser.add_argument('--execute', action='store_true', help='启动采集，省略时预览计划')
     args = parser.parse_args()
     ids = tuple(args.ids) if channels < 3 else (1, 2, 3)
@@ -214,4 +265,4 @@ def main(channels):
     print(f'ID {ids} · {len(points)} 个位移点 · {REPEATS} 遍 · 共 {len(points) * REPEATS} 轮', flush=True)
     if args.execute:
         with Robot() as robot:
-            AxisCapture(robot, ids, points, args.max_advance_mm).run()
+            AxisCapture(robot, ids, points, args.max_advance_mm, side_view=args.side_view).run()

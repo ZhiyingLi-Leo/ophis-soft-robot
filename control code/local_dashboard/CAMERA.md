@@ -119,6 +119,36 @@ python scripts/collect_triple.py --start-mm 2 --stop-mm 4 --step-mm 2
 
 批次保存在 `data/axis_capture_…/`，`points.json` 列出计划与完成轮次。每轮独立保存 `frame_*.npz` 中的原始彩色、原生和对齐深度，`frames.jsonl` 中的反馈和阶段时间，以及 `metadata.json` 和 `round.json`。后者也保存根据预览角生成的 T1 峰值候选及参考噪声判据。离线重算以本轮 T0 前静止段为零点，使用编码器定义的目标停留段。
 
+### Insta360 Ace Pro 侧视与双机采集
+
+在 `control code/local_dashboard/` 下构建 macOS 相机助手。需要 Apple Command Line Tools，构建本身只编译并校验本地应用签名。
+
+```sh
+sh device_plugins/build_uvc_helper.sh
+```
+
+1. 用 USB 数据线连接 Ace Pro，在相机屏幕上选择 Webcam 模式。打开工作台「相机」页，点击侧视面板的「刷新设备」，选择外接的 **Insta360 Ace**，再点「接入侧视相机」。首次接入时按 macOS 提示授权摄像头访问。D405 通过各自的接入按钮控制。
+2. 镜头正对弯曲平面，画面保持正立、橙色近端在左侧。点击「自动定位导管」，检查带余量的 ROI 能覆盖向上、向下的整个弯曲范围。在预览上拖框可重设 ROI，也可输入百分比边界。用「应用识别参数」提交白色阈值和橙色 HSV 范围，等预览应用这些设置后确认根部、尖端和角度。侧视角是白色柔性段根部切线到尖端切线的二维转角，向下为正。实验运行和记录收尾期间识别设置锁定。
+3. 面板显示实际图像尺寸与帧率。相机助手优先请求 1920×1080、约 30 fps，从设备公布的模式中选择可用的最近规格，或使用设备默认模式。接入失败时，检查 USB Webcam 模式、系统摄像头权限和是否有其他应用占用该设备。
+
+ID3 示例在工作台实验控制台运行。以下命令预览 1–2 mm、每点三轮的计划。现场确认行程和路径后，用 `--max-advance-mm` 填写现场确认的总推进量上限，并加上 `--execute` 开始采集。ID1、ID2 可使用相同的 `--side-view` 选项。
+
+```sh
+python scripts/collect_single.py --ids 3 --start-mm 1 --stop-mm 2 --side-view
+```
+
+双机模式要求两路相机在线、原始帧持续写入，起步前还需要有效侧视参考角。D405 三维测量缺失时照常保留原始帧和无效原因。侧视轮廓暂时丢失时留下带原因的无效角度。断流、写入失败或电缸反馈异常会停止本轮并保留已写入的文件。
+
+每轮在 D405 原有文件旁增加 `side_view/`，包含无叠加的 PNG 原始图、`metadata.json` 和 `frames.jsonl`，目标写入频率约 5 Hz。两路共同使用轮次根目录 `frames.jsonl` 的阶段注记。逐帧的主机单调时钟和反馈时间用于对齐 T0、目标停留和 T2。相机曝光间的偏移需用两路同时可见的事件实测。
+
+在本地终端运行侧视离线分析，输入一个已完成的单轴批次目录，或包含多个批次的父目录。输出目录需位于输入目录之外。
+
+```sh
+.venv/bin/python scripts/analyze_single.py --side-view data/axis_capture_… data/id3_side_results
+```
+
+`side_view/frames/` 保存重算中心线、逐帧角度、阶段和编码器反馈。 `side_view/rounds.csv` 保存各轮参考角、目标停留变化、带方向的峰值、返回残差和有效帧数。 `side_view/points.csv` 按电缸 ID 和位移统计有效重复数、均值、样本标准差和范围。
+
 ### 三电缸 Pre-test
 
 接入 D405 和三个电缸，把电缸停在实验参考位。按当前装配核对各轴 0.5 mm/s 的速度、并行推进和回退的安全路径，以及三轴推进增量之和上限。Pre-test 相对参考位的单轴最大增量为 2 mm，所有目标中最大组合增量之和为 4 mm。

@@ -54,6 +54,8 @@ class PretestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '新鲜、有效'):
             action('pretest_start', settings=settings, max_advance_mm=4)
         engine.camera.status['measurement_settings'] = settings
+        engine.side_view.status.update(online=True, last_frame_time=time.monotonic(),
+                                       measurement=dict(valid=True, angle_deg=15))
         with self.assertRaisesRegex(ValueError, '三维中心线'):
             action('pretest_start', settings=settings, max_advance_mm=4)
         engine.camera.status['measurement']['shape_3d'] = dict(valid=True,angle_deg=10)

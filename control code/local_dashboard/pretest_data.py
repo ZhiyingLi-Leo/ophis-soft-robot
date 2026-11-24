@@ -14,6 +14,28 @@ def read_capture(path):
     return frames, events
 
 
+def read_side_capture(path):
+    directory = path / 'side_view'
+    with (directory / 'frames.jsonl').open(encoding='utf-8') as index:
+        items = [json.loads(line) for line in index]
+    frames = [item for item in items if item['kind'] == 'frame']
+    if not items or items[-1]['kind'] != 'end' or items[-1]['frames'] != len(frames):
+        raise ValueError(f'侧视记录不完整：{directory}')
+    return frames
+
+
+def side_angle(measurement):
+    measurement = measurement or {}
+    angle = measurement.get('angle_deg')
+    if measurement.get('valid') and type(angle) in (float, int) and math.isfinite(angle) and -180 <= angle <= 180:
+        return angle
+    return None
+
+
+def signed_delta(angle, reference):
+    return (angle - reference + 180) % 360 - 180
+
+
 def save_json(path, result):
     pending = path.with_suffix('.json.tmp')
     pending.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))

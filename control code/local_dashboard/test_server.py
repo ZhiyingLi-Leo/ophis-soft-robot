@@ -88,8 +88,14 @@ class Tests(unittest.TestCase):
         port.line.assert_any_call('STATUS','STATUS ')
 
     def test_no_hardware_on_start(self):
-        with patch('server.Serial', side_effect=AssertionError('must not open')):
-            e=Engine(CONFIG, testing=True); e.scan(); e.action(dict(action='connect_axis',axis=0,client='x')); e.close()
+        with patch('server.Serial', side_effect=AssertionError('must not open')), \
+             patch('device_plugins.uvc._device_list', side_effect=AssertionError('must not discover')), \
+             patch('device_plugins.uvc.subprocess.Popen', side_effect=AssertionError('must not open')):
+            e=Engine(CONFIG, testing=True)
+            e.scan()
+            e.action(dict(action='connect_axis',axis=0,client='x'))
+            self.assertFalse(e.state()['modules']['camera.side_view']['state']['online'])
+            e.close()
     def test_independent_axis_and_move(self):
         self.command('connect_axis', axis=1)
         self.assertEqual([a['online'] for a in self.e.axes], [False, True, False])
@@ -404,6 +410,69 @@ class Tests(unittest.TestCase):
             self.e.axes[1]['armed']=True
             with self.assertRaises(ValueError): self.e.scan()
 
+    def test_axis_pair_partial_start_stops_d405_without_motion(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.e.camera.data_root=Path(folder)
+            self.command('heartbeat')
+            self.e.camera.status.update(online=True,last_frame_time=time.monotonic())
+            with self.assertRaisesRegex(ValueError,'仅由实验脚本'):
+                self.command('axis_record_start',label='trial',group='test')
+            with self.assertRaisesRegex(ValueError,'新鲜图像'):
+                self.command('axis_record_start',label='trial',group='test',_script=True)
+            self.assertFalse(self.e.camera.snapshot()['recording'])
+            self.assertFalse(self.e.side_view.snapshot()['recording'])
+            path, = Path(folder).glob('test/*/frames.jsonl')
+            self.assertEqual(json.loads(path.read_text().splitlines()[-1])['kind'],'end')
+            self.assertFalse(any(a['armed'] or a['moving'] for a in self.e.axes))
+
+    def test_axis_recorders_stop_on_escape_and_lease_expiry(self):
+        from test_uvc import catheter
+        from pretest_data import read_side_capture
+
+        self.command('heartbeat')
+        with tempfile.TemporaryDirectory() as folder:
+            self.e.camera.data_root=Path(folder)
+            for action in ('stop_all','lease'):
+                now=time.monotonic()
+                self.e.camera.status.update(online=True,last_frame_time=now)
+                self.e.side_view._publish(dict(host_receive_monotonic=now,frame_number=1 if action=='stop_all' else 2,
+                                               fps=30),catheter())
+                result=self.e.action(dict(action='axis_record_start',client='test',label=action,group='test',_script=True))
+                recorder=self.e.side_view.recording
+                if action=='lease':
+                    self.e.heartbeat=time.monotonic()-2
+                    self.e.expire_control()
+                else:
+                    self.command('stop_all')
+                recorder['thread'].join(2)
+                path=Path(result['session_path'])
+                self.assertEqual(read_side_capture(path),[])
+                self.assertFalse(self.e.camera.snapshot()['recording'])
+                self.assertFalse(self.e.side_view.snapshot()['finalizing'])
+                self.assertTrue(self.e.side_view.snapshot()['online'])
+
+    def test_side_configuration_is_independent_and_auto_locate_rechecks_experiment(self):
+        from test_uvc import catheter
+
+        original = copy.deepcopy(self.e.camera.settings)
+        now=time.monotonic()
+        self.e.side_view._publish(dict(host_receive_monotonic=now,frame_number=1,fps=30),catheter())
+        real_candidate=self.e.side_view.roi_candidate
+        with patch.object(self.e.experiment,'process',None):
+            def candidate():
+                result=real_candidate()
+                self.e.experiment.process=object()
+                return result
+            with patch.object(self.e.side_view,'roi_candidate',side_effect=candidate):
+                with self.assertRaisesRegex(ValueError,'实验状态已变化'):
+                    self.command('device',device='camera.side_view',operation='auto_locate')
+            with self.assertRaisesRegex(ValueError,'实验运行中'):
+                self.command('device',device='camera.side_view',operation='configure',arguments={'white_sat':12})
+        self.assertEqual(self.e.side_view.snapshot()['settings']['roi'],[0.,0.,1.,1.])
+        self.command('device',device='camera.side_view',operation='auto_locate')
+        self.assertLess(self.e.side_view.snapshot()['settings']['roi'][2],1.)
+        self.assertEqual(self.e.camera.settings,original)
+
     def test_http_local_only(self):
         import urllib.request
         server=ThreadingHTTPServer(('127.0.0.1',0),Handler); server.engine=self.e
@@ -411,7 +480,7 @@ class Tests(unittest.TestCase):
         url=f'http://127.0.0.1:{server.server_port}'
         try:
             self.assertEqual(json.load(urlopen(url+'/api/state'))['mode'],'simulation')
-            for route in ('/scene.js','/vendor/three.module.js','/vendor/GLTFLoader.js'):
+            for route in ('/scene.js','/side-camera.js','/vendor/three.module.js','/vendor/GLTFLoader.js'):
                 with urlopen(url+route) as response:
                     self.assertIn('text/javascript', response.headers['Content-Type'])
                     self.assertGreater(len(response.read()), 100)
@@ -420,6 +489,18 @@ class Tests(unittest.TestCase):
                     self.assertEqual(response.headers['Content-Type'], 'model/gltf-binary')
                     self.assertEqual(response.read(4), b'glTF')
             with self.assertRaises(HTTPError): urlopen(url+'/models/../../server.py')
+            with patch.object(self.e.side_view,'discover',return_value=[{'id':'ace','name':'Insta360 Ace','type':'external'}]):
+                self.assertEqual(json.load(urlopen(url+'/api/camera/side-view/devices'))[0]['id'],'ace')
+            with self.assertRaises(HTTPError) as absent:
+                urlopen(url+'/api/camera/side-view/preview')
+            self.assertEqual(absent.exception.code,404)
+            preview=(b'test JPEG',{'roi':[.1,.2,.9,.8]})
+            with patch.object(self.e.side_view,'preview',return_value=preview):
+                with urlopen(url+'/api/camera/side-view/preview') as response:
+                    self.assertEqual(response.read(),preview[0])
+                    self.assertEqual(json.loads(response.headers['X-Camera-Settings']),preview[1])
+            req=Request(url+'/api/camera/side-view/devices',headers={'Host':'evil.example'})
+            with self.assertRaises(HTTPError): urlopen(req)
 
             req=Request(url+'/api/action',data=b'{"action":"stop_all"}',headers={'Content-Type':'application/json','Origin':'https://evil.example'})
             with self.assertRaises(HTTPError): urlopen(req)
