@@ -3,7 +3,7 @@
 <body>
 <header class="topbar"><a class="brand" href="/" aria-label="Ophis Lab 工作站"><svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><g fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M48 15C33 1 10 12 10 32c0 17 16 28 31 22 12-5 17-17 13-27"/><path d="M43 20C32 10 17 18 17 32c0 12 11 20 21 16 8-3 12-11 9-18"/><path d="m47 30 7-3"/></g></svg><b>OPHIS<span>LAB</span></b></a><div class="workstation">液压导管控制工作站</div><div class="topcontrols"><button id="devicepanel" aria-expanded="false">设备</button><span class="hardwarelabel">真实硬件</span><div class="servicestatus" aria-label="本地服务与控制心跳"><span id="connection" class="service"><i class="dot"></i><span>服务连接中</span></span><span id="heartbeatstatus" class="service">等待心跳</span></div><button class="stopall" id="stop"><span>■</span> 全部停止 <kbd>Esc</kbd></button></div></header>
 <div class="shell">
-<aside class="sidebar"><div class="sideheading"><span>设备拓扑</span><span id="count">0 / 6</span></div><div class="topology"><div class="treeparent"><span class="treeicon">⌘</span><div>本地控制服务</div><i id="serverdot" class="dot"></i></div><button class="modulelink selected" id="navoverview"><span class="moduleicon">◇</span><span>系统总览</span></button><div class="treebranch"><button class="modulelink" id="navhydraulic"><span class="moduleicon">≋</span><span>液压驱动</span></button><div class="axistree" id="axistree"></div><button class="modulelink" id="navprop"><span class="moduleicon">⊙</span><span>滚轮推进器<small id="navpropstate">未接入</small></span><i id="propdot" class="dot"></i></button><button class="modulelink" id="navcamera"><span class="moduleicon">▣</span><span>相机<small id="cnavstatus">D405 未接入</small><small id="side-nav-status">侧视未接入</small></span><i id="cameradot" class="dot"></i></button></div><button class="modulelink" id="navconsole"><span class="moduleicon">›_</span><span>实验控制台<small id="navconsolestate">空闲</small></span><i id="consoledot" class="dot"></i></button></div>
+<aside class="sidebar"><div class="sideheading"><span>设备拓扑</span><span id="count">0 / 6</span></div><div class="topology"><div class="treeparent"><span class="treeicon">⌘</span><div>本地控制服务</div><i id="serverdot" class="dot"></i></div><button class="modulelink selected" id="navoverview"><span class="moduleicon">◇</span><span>系统总览</span></button><div class="treebranch"><button class="modulelink" id="navhydraulic"><span class="moduleicon">≋</span><span>液压驱动</span></button><div class="axistree" id="axistree"></div><button class="modulelink" id="navprop"><span class="moduleicon">⊙</span><span>滚轮推进器<small id="navpropstate">未接入</small></span><i id="propdot" class="dot"></i></button><button class="modulelink" id="navcamera"><span class="moduleicon">▣</span><span>实验台<small id="cnavstatus">D405 未接入</small><small id="side-nav-status">侧视 未接入</small><small id="navexperiment">实验 空闲</small></span><i id="cameradot" class="dot"></i></button></div></div>
 <div class="sideheading portsheading"><span>串口设备</span><button id="scan" class="iconbutton" title="扫描设备" aria-label="扫描设备">↻</button></div><div id="devices" class="devices"><p class="empty">尚未扫描设备</p></div><p class="sidehint" id="notice">各模块独立接入；扫描识别不会触发运动。</p><section class="panel gamepadpanel" id="gamepadpanel" aria-label="手柄控制"><h2>手柄控制</h2><span id="gpstatus" role="status">等待手柄</span><div class="gamepadactions"><button id="gpstart" title="摇杆回中后连接并启用已接入设备">连接</button><button id="gpstop" title="退出手柄控制并停止">退出</button></div></section><div class="sidebarbottom" id="sidebarbottom"><p><i class="dot online"></i>连接不触发运动</p><p><i class="dot online"></i>浏览器失联请求停止</p></div></aside>
 <main>
 <section class="pageheading"><div><h1><span id="pagetitle">系统总览</span></h1></div><div id="camera-view-mode" class="segmented" role="group" aria-label="相机视图" hidden>
@@ -15,7 +15,7 @@
 <div id="hydraulicpage" class="modulepage" hidden><section class="sectionheading"><div><span class="sectionnumber">01</span><h2>液压通道</h2></div><span class="subtle">目标：绝对位置 / mm</span></section><section id="axes" class="axes"></section>
 <section class="groupbar"><div><b>三轴协同</b><button id="armgroup" type="button">一键启用三轴</button><span>仅全部启用时可用</span></div><div class="groupinputs"><label><i style="background:var(--ch1)"></i><span class="sr">电缸 1 目标</span><input id="g0" aria-label="电缸 1 协同目标" type="number" value="0" step="0.1"><span>mm</span></label><label><i style="background:var(--ch2)"></i><span class="sr">电缸 2 目标</span><input id="g1" aria-label="电缸 2 协同目标" type="number" value="0" step="0.1"><span>mm</span></label><label><i style="background:var(--ch3)"></i><span class="sr">电缸 3 目标</span><input id="g2" aria-label="电缸 3 协同目标" type="number" value="0" step="0.1"><span>mm</span></label><button id="groupmove" class="primary">执行三轴目标 <span>→</span></button></div></section>
 </div><section id="propsection" class="panel modulepage" hidden><div class="panelheading"><h2><span class="sectionnumber">02</span> 滚轮推进</h2><span class="status" id="pstate">未接入</span></div><div class="propbody"><div class="propreadout"><b id="pspeed">0</b><span>step/s</span></div><button id="pconnect" class="connectbutton">接入推进器</button></div><div id="motorcards" class="motorcards"></div><p class="panelnote">频率与电流为板端设定值，非实测值。M1–M4 对应待核对。</p><div class="groupspeed"><label>四电机统一速度 <input id="groupspeed" type="number" min="0" max="1600" step="1" value="400"> step/s</label><button id="applygroup">应用速度</button></div><div class="propcontrols"><button id="pback">← 一起后退</button><button id="pstop">■ 停止</button><button id="pforward">一起前进 →</button></div><p class="panelnote">前进 / 后退持续运行，点击停止结束。浏览器失联停止。<br>Nano 无断线看门狗，实物需独立停机手段。</p></section>
-<section id="camerasection" class="modulepage" data-view-mode="both" aria-label="相机工作区" hidden>
+<section id="camerasection" class="modulepage" data-view-mode="both" aria-labelledby="pagetitle" hidden>
   <section class="panel camera-card" id="d405-card" aria-labelledby="d405-heading">
     <div class="panelheading">
       <h2 id="d405-heading">深度视觉 · D405</h2><span class="status" id="cstatus">未接入</span>
@@ -41,62 +41,9 @@
         <button id="cresetroi" type="button" disabled>重置全景</button>
         <button class="primary" id="crecord" type="button" disabled>开始记录</button><button id="crecordstop" type="button" disabled>结束记录</button>
         <span id="crecordstate">未记录</span>
-        <span id="czoomhint" hidden>切换到「显示全景」后可重新拖框</span>
+        <span id="czoomhint" hidden>全景下可重新拖框</span>
       </div>
       <p id="cerror" class="axiserror camera-error" role="status"></p>
-      <div id="pretestsetup" class="pretestbar" hidden>
-        <h3>Pre-test 识别预览</h3>
-        <p>自动定位或拖框时，确保识别区域包含橙色近端和白色柔性段的活动范围。确认根部、尖端和三维中心线后开始。</p>
-        <label>现场确认的三轴推进增量之和上限（mm）
-          <input id="pretestlimit" aria-label="三轴推进增量之和上限" type="number" min="4" max="48" step="any" placeholder="最大采样点需要 4 mm">
-        </label>
-        <div class="commandrow"><button id="pretestconfirm" class="primary" disabled>确认并开始采集</button><button id="pretestcancel">返回实验控制台</button></div>
-        <p id="pretestready" role="status"></p>
-      </div>
-      <details class="camera-drawer" id="cameraShapeDrawer">
-        <summary>三维中心线视图</summary>
-        <div class="drawer-content">
-          <div id="cameraShapeSlot">
-            <figure id="cameraShapePanel" class="camerashape">
-              <figcaption><b>三维中心线</b><span>弯曲角取橙色近端轴线与深蓝色尖端切线的夹角</span></figcaption>
-              <div class="camerashapeview">
-                <canvas id="cameraShapeCanvas" aria-label="D405 重建的三维柔性导管中心线"></canvas>
-                <p id="cameraShapeStatus" role="status">等待有效三维中心线</p>
-              </div>
-              <p class="panelnote">相机方向 · 根部为显示原点 · 网格间隔 5 mm。使用已知夹角核对测量精度。</p>
-            </figure>
-          </div>
-        </div>
-      </details>
-      <details class="camera-drawer">
-        <summary>识别区域与颜色参数</summary>
-        <div class="drawer-content">
-          <p class="panelnote">柔性末端 30 mm × Ø6 mm · 悬空 · 绿色背景 · 橙色近端</p>
-          <fieldset id="d405-config" disabled>
-            <div class="cameraform">
-              <label>左 % <input id="cx0" type="number" min="0" max="100" step="any" value="0"></label>
-              <label>上 % <input id="cy0" type="number" min="0" max="100" step="any" value="0"></label>
-              <label>右 % <input id="cx1" type="number" min="0" max="100" step="any" value="100"></label>
-              <label>下 % <input id="cy1" type="number" min="0" max="100" step="any" value="100"></label>
-              <label>最低亮度 <input id="cwhite" type="number" min="0" max="255" value="85"></label>
-              <label>最高饱和度 <input id="csat" type="number" min="0" max="255" value="100"></label>
-              <button id="capply" type="button">应用参数</button>
-            </div>
-          </fieldset>
-        </div>
-      </details>
-      <details class="camera-drawer">
-        <summary>实验记录与快捷指令</summary>
-        <div class="drawer-content camera-record-options">
-          <label for="clabel">实验名称</label><input id="clabel" maxlength="100" placeholder="例如：悬空参考姿态">
-          <p id="csession" class="camerapath"></p>
-          <p class="panelnote">按目标 5 帧/秒保存原始颜色、原生深度、对齐深度、时间戳、识别结果和电缸反馈。</p>
-          <div class="camera-shortcuts"><span>依赖 <b id="cdeps">检查中</b></span>
-            <button type="button" data-command="python scripts/camera_check.py">填入环境检查指令</button>
-            <button type="button" data-command="python scripts/camera_record.py --seconds 30 --label reference">填入 30 秒记录指令</button>
-          </div>
-        </div>
-      </details>
     </div>
   </section>
   <section class="panel camera-card" id="side-card" aria-labelledby="side-heading">
@@ -119,72 +66,55 @@
         <div><span>配对记录</span><b id="side-record">未记录</b></div>
       </div>
       <div class="camera-quick">
-        <button id="side-locate" class="primary" type="button">自动定位导管</button>
+        <button id="side-locate" type="button" disabled>自动定位导管</button>
         <button id="side-zoom" type="button" disabled>放大导管</button>
         <button id="side-resetroi" type="button" disabled>重置全景</button>
-        <span id="side-zoomhint" hidden>切换到「显示全景」后可重新拖框</span>
+        <span id="side-zoomhint" hidden>全景下可重新拖框</span>
         <span id="side-lock" hidden>实验或记录期间锁定识别设置</span>
       </div>
       <p id="side-error" class="axiserror camera-error" role="status"></p>
-      <details class="camera-drawer">
-        <summary>识别区域与颜色阈值</summary>
-        <div class="drawer-content">
-          <p class="panelnote">可拖框或自动定位。检查 ROI 是否覆盖完整弯曲范围。</p>
-          <fieldset id="side-config" disabled>
-            <div class="cameraform">
-              <label>左 % <input id="side-x0" type="number" min="0" max="100" step="any"></label>
-              <label>上 % <input id="side-y0" type="number" min="0" max="100" step="any"></label>
-              <label>右 % <input id="side-x1" type="number" min="0" max="100" step="any"></label>
-              <label>下 % <input id="side-y1" type="number" min="0" max="100" step="any"></label>
-              <label>白色最低亮度 <input id="side-white" type="number" min="0" max="255"></label>
-              <label>白色最高饱和度 <input id="side-sat" type="number" min="0" max="255"></label>
-            </div>
-            <details><summary>橙色 HSV 阈值</summary><div class="cameraform">
-              <label>最低色相 <input id="side-min-h" type="number" min="0" max="179"></label>
-              <label>最低饱和度 <input id="side-min-s" type="number" min="0" max="255"></label>
-              <label>最低亮度 <input id="side-min-v" type="number" min="0" max="255"></label>
-              <label>最高色相 <input id="side-max-h" type="number" min="0" max="179"></label>
-              <label>最高饱和度 <input id="side-max-s" type="number" min="0" max="255"></label>
-              <label>最高亮度 <input id="side-max-v" type="number" min="0" max="255"></label>
-            </div></details>
-            <button id="side-apply" type="button">应用识别参数</button>
-          </fieldset>
+    </div>
+  </section>
+  <section class="panel consolepanel" aria-labelledby="experiment-heading">
+    <div class="panelheading"><h2 id="experiment-heading">实验指令与日志</h2><span id="scriptstate" class="status">空闲</span></div>
+    <div class="consolebody">
+      <div class="experiment-toolbar">
+        <div class="command-presets" role="group" aria-label="指令预设">
+          <button type="button" data-command="python scripts/status.py">状态查询</button>
+          <button type="button" data-command="python scripts/collect_single.py --ids 3 --start-mm 1 --stop-mm 2 --side-view">ID3 侧视预览</button>
+          <button type="button" data-command="python scripts/camera_check.py">相机检查</button>
         </div>
-      </details>
+        <div class="pretest-actions">
+          <button type="button" class="primary" id="pretestopen" aria-controls="pretestsetup" aria-expanded="false" disabled>运行 Pre-test</button>
+          <button type="button" id="pretestpause" hidden>本轮结束后暂停</button>
+          <button type="button" id="pretestresume" hidden>继续采集</button>
+        </div>
+      </div>
+      <div id="pretestsetup" class="pretestbar" hidden>
+        <h3>Pre-test 识别预览</h3>
+        <p>自动定位或拖框时，确保识别区域包含橙色近端和白色柔性段的活动范围。检查预览中的根部、尖端及三维弯曲角。</p>
+        <label>现场确认的三轴推进增量之和上限（mm）
+          <input id="pretestlimit" aria-label="三轴推进增量之和上限" type="number" min="4" max="48" step="any" placeholder="最大采样点需要 4 mm">
+        </label>
+        <div class="commandrow"><button id="pretestconfirm" type="button" class="primary" disabled>确认并开始采集</button><button id="pretestcancel" type="button">取消</button></div>
+        <p id="pretestready" role="status"></p>
+      </div>
+      <div id="pretestprogress" class="pretestbar" hidden>
+        <progress id="pretestbar" aria-label="Pre-test 已完成轮数"></progress>
+        <p id="pretestphase" role="status"></p><p id="pretestangle"></p><p id="pretestfiles" class="camerapath"></p>
+      </div>
+      <form id="consoleform">
+        <label class="sr" for="command">实验指令</label>
+        <div class="commandrow">
+          <input id="command" list="commands" autocomplete="off" spellcheck="false" placeholder="python scripts/status.py">
+          <datalist id="commands"></datalist>
+          <button id="runcommand" class="primary" disabled>运行</button><button type="button" id="stopscript">停止实验</button>
+        </div>
+      </form>
+      <div id="commandhint" class="commandhint">help · scripts · python scripts/name.py [参数] · stop · clear</div>
+      <pre id="consoleoutput" tabindex="0" role="log" aria-label="脚本输出">输入 help 查看指令。</pre>
     </div>
   </section>
 </section>
 <section id="overviewcards" class="overviewcards" aria-label="模块状态"></section>
-<section class="panel consolepanel modulepage" id="consolepage" aria-label="实验控制台" hidden>
-  <div class="panelheading"><h2>实验指令与进度</h2><span id="scriptstate" class="status">空闲</span></div>
-  <div class="consolebody">
-    <div class="pretestbar">
-      <div class="commandrow">
-        <button type="button" class="primary" id="pretestopen" disabled>运行 Pre-test</button>
-        <button type="button" id="pretestpause" hidden>本轮结束后暂停</button>
-        <button type="button" id="pretestresume" hidden>继续采集</button>
-      </div>
-      <div id="pretestprogress" hidden>
-        <progress id="pretestbar" aria-label="Pre-test 已完成轮数"></progress>
-        <p id="pretestphase" role="status"></p><p id="pretestangle"></p><p id="pretestfiles" class="camerapath"></p>
-        <div id="pretestShapeSlot"></div>
-      </div>
-    </div>
-    <div class="command-presets" role="group" aria-label="指令预设">
-      <button type="button" data-command="python scripts/status.py">状态查询</button>
-      <button type="button" data-command="python scripts/collect_single.py --ids 3 --start-mm 1 --stop-mm 2 --side-view">ID3 侧视预览</button>
-      <button type="button" data-command="python scripts/camera_check.py">相机检查</button>
-    </div>
-    <form id="consoleform">
-      <label for="command">指令</label>
-      <div class="commandrow">
-        <input id="command" list="commands" autocomplete="off" spellcheck="false" placeholder="python scripts/status.py">
-        <datalist id="commands"></datalist>
-        <button id="runcommand" class="primary" disabled>运行</button><button type="button" id="stopscript">停止实验</button>
-      </div>
-    </form>
-    <div id="commandhint" class="commandhint">help · scripts · python scripts/name.py [参数] · stop · clear</div>
-    <pre id="consoleoutput" role="log" aria-label="脚本输出">输入 help 查看指令。</pre>
-  </div>
-</section>
 </main></div><div id="toast" role="alert"></div><script type="module" src="/app.js"></script></body></html>

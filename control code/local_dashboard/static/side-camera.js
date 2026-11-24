@@ -6,11 +6,8 @@ export function setupSideCamera(act){
   const key='camera.side_view';
   const device=(operation,args={})=>act('device',{device:key,operation,arguments:args});
   const image=$('side-preview'), select=$('side-devices');
-  const roiFields=['side-x0','side-y0','side-x1','side-y1'];
-  const colorFields=['side-white','side-sat','side-min-h','side-min-s','side-min-v','side-max-h','side-max-s','side-max-v'];
-  const number=id=>$(id).valueAsNumber;
   let camera, fresh=false, locked=false, pending=false, listing=false;
-  let settingsRoi, previousSettings='';
+  let settingsRoi;
   let error='';
   const preview=setupCameraPreview({
     image,card:$('side-card'),placeholder:$('side-placeholder'),endpoint:'/api/camera/side-view/preview',
@@ -18,20 +15,10 @@ export function setupSideCamera(act){
     onReset:roi=>updateSettings('configure',{roi})
   });
 
-  function syncSettings(force=false,s=camera?.settings){
-    if(!s)return;
-    const signature=JSON.stringify(s);
-    if(!force&&signature===previousSettings)return;
-    previousSettings=signature;
-    settingsRoi=s.roi;
-    s.roi.forEach((value,i)=>$(roiFields[i]).value=+(value*100).toFixed(4));
-    [s.white_min,s.white_sat,...s.orange_min,...s.orange_max].forEach((value,i)=>$(colorFields[i]).value=value);
-  }
   function activeConnection(){
     return camera?.online||['连接中','等待侧视首帧'].includes(camera?.status);
   }
   function controls(autoZoom=false){
-    $('side-config').disabled=!camera||locked||pending;
     $('side-locate').disabled=!fresh||locked||pending;
     $('side-lock').hidden=!locked;
     $('side-discover').disabled=!camera||locked||listing;
@@ -50,7 +37,7 @@ export function setupSideCamera(act){
   async function updateSettings(operation,args,autoZoom=false){
     const result=await command(operation,args);
     if(result?.settings){
-      syncSettings(true,result.settings);
+      settingsRoi=result.settings.roi;
       controls(autoZoom);
     }
   }
@@ -74,13 +61,6 @@ export function setupSideCamera(act){
   };
   select.onchange=controls;
   $('side-connect').onclick=()=>activeConnection()?command('disconnect'):command('connect',{device_id:select.value});
-  $('side-apply').onclick=()=>{
-    const values=colorFields.map(number);
-    const roi=roiFields.map(id=>number(id)/100);
-    if(![...values,...roi].every(Number.isFinite)){error='请填写全部 ROI 和颜色参数。';controls();return;}
-    updateSettings('configure',{roi,white_min:values[0],white_sat:values[1],
-      orange_min:values.slice(2,5),orange_max:values.slice(5,8)});
-  };
   $('side-locate').onclick=()=>updateSettings('auto_locate',{},true);
 
   installRoiDrag(image,$('side-cropbox'),{
@@ -95,7 +75,8 @@ export function setupSideCamera(act){
     camera=state?.modules?.[key]?.state;
     fresh=!!(camera?.online&&camera.frame_age!==null&&camera.frame_age<1);
     locked=!!(camera?.recording||camera?.finalizing||['running','stopping'].includes(state?.experiment?.status));
-    syncSettings();controls();
+    settingsRoi=camera?.settings?.roi;
+    controls();
     const status=$('side-status');
     status.textContent=camera?.error?'故障':camera?.status||'服务离线';
     status.className='status '+(camera?.error?'error':fresh?'ready':'');

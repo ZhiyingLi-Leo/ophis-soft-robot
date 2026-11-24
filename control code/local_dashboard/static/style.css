@@ -10,29 +10,11 @@
 
 .feedbacklines{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.feedbacklines line{stroke:#a8b9c6;stroke-width:1;stroke-dasharray:2 3}.telemetrylabel{z-index:1}
 
-.motorspeed{display:flex;align-items:center;gap:5px;font-size:11px}.motorspeed input{width:75px;min-width:0}.motorcard>button{width:100%;margin-top:8px}.motorbuttons{display:flex;gap:4px;margin-top:8px}.motorbuttons button{flex:1;padding:7px 2px}.groupspeed{padding:15px 20px;display:flex;gap:12px;align-items:center;font-size:12px}.groupspeed input{width:90px}.consolebody{padding:18px}.commandrow{display:flex;gap:8px;margin-top:8px}.commandrow input{flex:1;min-width:0;font-family:monospace}.commandhint{font-size:11px;color:#7d8b98;margin:10px 0}#consoleoutput{height:clamp(340px,43vh,420px);overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f7fa;border:1px solid #e2e7ed;padding:12px;font:12px/1.6 monospace;margin:0}.consolebody>form>label{font-size:12px}@media(max-width:760px){.commandrow{flex-wrap:wrap}.commandrow input{flex-basis:100%}}
+.motorspeed{display:flex;align-items:center;gap:5px;font-size:11px}.motorspeed input{width:75px;min-width:0}.motorcard>button{width:100%;margin-top:8px}.motorbuttons{display:flex;gap:4px;margin-top:8px}.motorbuttons button{flex:1;padding:7px 2px}.groupspeed{padding:15px 20px;display:flex;gap:12px;align-items:center;font-size:12px}.groupspeed input{width:90px}
 
 .motorspeed input,.groupspeed input,.commandrow input{border:1px solid #d9e1e8;border-radius:3px;background:#f9fbfd;color:#334656;padding:8px;font-size:12px;outline:none}.motorspeed input:focus,.groupspeed input:focus,.commandrow input:focus{border-color:#6c91ad}.commandrow input{padding:10px 12px}.motorcard{padding:16px}
 
 .controlreason{padding:8px 12px;background:#fbeeee;border:1px solid #ebcfcf;color:#8b3e3b;font-size:12px;border-radius:3px;margin:0 0 12px}
-.pretestbar{margin:14px 0;padding:12px 14px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}
-#pretestsetup{margin:8px 0}
-.pretestbar h3,.pretestbar p{margin:0 0 8px}
-.pretestbar p:empty{display:none}
-.pretestbar label{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
-.pretestbar input[type=number]{width:180px;max-width:100%;padding:4px 6px}
-.pretestbar progress{display:block;width:100%;margin:10px 0 6px;accent-color:var(--blue)}
-.camerashape{min-width:0;margin:0}
-#pretestShapeSlot .camerashape{margin:10px 0 0}
-.camerashape figcaption{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:0 0 8px}
-.camerashape figcaption span{color:var(--muted);font-size:12px}
-.camerashapeview{position:relative;background:#f6f8fb;border:1px solid var(--line);border-radius:4px;overflow:hidden}
-.camerashape canvas{display:block;width:100%;height:clamp(196px,32vw,310px);touch-action:none;cursor:grab}
-.camerashapeview p{position:absolute;top:12px;left:12px;margin:0;padding:6px 10px;color:var(--ink);background:#fffffff0;border-radius:5px;pointer-events:none}
-.camerashapeview p:empty{display:none}
-.camerashape canvas[hidden]{display:none}
-.camerashapeview:has(canvas[hidden]){min-height:46px}
-.camerashape .panelnote{margin:8px 0 0}
 
 /* Service and device navigation */
 .topcontrols { gap: 14px; }
@@ -53,7 +35,6 @@
 .dot.partial { background: #fff; border: 1px solid var(--blue); }
 .modulelink.selected { background: #e9f0f7; color: #234f76; }
 .modulelink small { color: #637485; }
-#navconsole { margin-top: 2px; }
 .sidebar { padding-block: 14px 12px; }
 .sidebar .sideheading { margin-bottom: 8px; }
 .treeparent { margin-bottom: 8px; }
@@ -90,21 +71,23 @@ main { max-width: none; width: 100%; }
 body[data-page="hydraulic"] #stage,
 body[data-page="prop"] #stage { height: clamp(260px, calc(100vh - 540px), 620px); }
 
-.overviewcards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.overviewcards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
 .summarycard { display: grid; align-content: start; gap: 8px; min-width: 0; padding: 13px; text-align: left; }
 .summarytitle { font-size: 13px; font-weight: 600; }
 .summarytitle > span { margin-right: 4px; color: var(--blue); font: 11px var(--mono); }
 .summaryreadout { display: flex; flex-wrap: wrap; gap: 3px 10px; color: #647586; font-size: 11px; }
 
-body[data-page="camera"] main, body[data-page="console"] main { padding-bottom: 16px; }
-body[data-page="camera"] .pageheading, body[data-page="console"] .pageheading { margin-bottom: 14px; gap: 10px; }
-body[data-page="camera"] h1, body[data-page="console"] h1 { margin: 0; }
+body[data-page="camera"] main { display: flex; flex-direction: column; padding-bottom: 16px; }
+body[data-page="camera"] .pageheading { margin-bottom: 14px; gap: 10px; }
+body[data-page="camera"] h1 { margin: 0; }
 .segmented { display: flex; padding: 2px; border: 1px solid var(--line); border-radius: 4px; background: #eef2f6; }
 .segmented button { border: 0; background: transparent; padding: 6px 12px; white-space: nowrap; }
 .segmented [aria-pressed="true"] { background: var(--blue); color: #fff; }
 
-#camerasection { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
+#camerasection { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 @media (min-width: 901px) {
+  body[data-page="camera"] main { min-height: calc(100vh - 66px); }
+  #camerasection { flex: 1; grid-template-rows: auto 1fr; }
   #camerasection[data-view-mode="both"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .camera-card { min-width: 0; }
@@ -115,12 +98,12 @@ body[data-page="camera"] h1, body[data-page="console"] h1 { margin: 0; }
 .camera-body { min-width: 0; padding: 0 12px 9px; }
 .cameraconnect { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; margin: 9px 0; }
 .cameraconnect select { width: 100%; min-width: 0; padding: 5px 7px; text-overflow: ellipsis; background: #f7f9fb; }
-.cameraconnect button, .camera-quick button, .camera-shortcuts button { padding: 5px 8px; font-size: 11px; }
+.cameraconnect button, .camera-quick button { padding: 5px 8px; font-size: 11px; }
 .camerapreview {
   position: relative;
   aspect-ratio: 16 / 9;
   width: 100%;
-  max-height: clamp(280px, calc(100vh - 340px), 780px);
+  max-height: clamp(190px, calc(60vh - 286px), 610px);
   background: #edf1f5;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -153,47 +136,47 @@ body[data-page="camera"] h1, body[data-page="console"] h1 { margin: 0; }
 .camera-error { font-size: 11px; margin: 0; }
 .camera-error:not(:empty) { margin: 0 0 8px; }
 .camera-error:empty { display: none; }
-.camera-drawer { border-top: 1px solid var(--line); }
-.camera-drawer summary { padding: 6px 2px; color: #38526a; font-size: 12px; font-weight: 500; cursor: pointer; }
-.camera-drawer summary:hover { background: #f5f8fb; }
-.camera-drawer summary:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
-.drawer-content { padding: 4px 2px 9px; }
-.drawer-content .panelnote { margin: 0 0 6px; }
-.camera-drawer .camerashape figcaption b { display: none; }
-.camerashape .panelnote { margin: 6px 0 0; }
-.cameraform { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 100px), 1fr)); gap: 7px; align-items: end; }
-.cameraform label { display: grid; gap: 4px; font-size: 11px; color: #526477; }
-.cameraform input, .camera-record-options input {
-  width: 100%;
-  min-width: 0;
-  padding: 5px 7px;
+.consolepanel { grid-column: 1 / -1; min-width: 0; display: flex; flex-direction: column; }
+.consolepanel .panelheading { padding: 11px 12px; }
+.consolepanel h2 { font-size: 14px; }
+.consolebody { display: flex; flex: 1; flex-direction: column; gap: 7px; min-width: 0; padding: 10px 12px 12px; }
+.experiment-toolbar, .command-presets, .pretest-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.experiment-toolbar { justify-content: space-between; }
+.consolebody button { padding: 5px 9px; font-size: 11px; }
+.commandrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.commandrow input { flex: 1 1 200px; min-width: 0; padding: 6px 9px; }
+.commandhint { color: #647586; font-size: 11px; overflow-wrap: anywhere; }
+#consoleoutput {
+  flex: 1 1 104px;
+  min-height: 104px;
+  contain: size;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #f5f7fa;
   border: 1px solid var(--line);
-  border-radius: 3px;
-  background: #f9fbfd;
+  border-radius: 4px;
+  padding: 9px 11px;
+  font: 12px/1.55 var(--mono);
+  margin: 0;
 }
-.cameraform button, #side-apply { padding: 5px 7px; font-size: 11px; }
-.camera-record-options label { display: block; margin-bottom: 4px; font-size: 11px; }
+.pretestbar { display: grid; gap: 6px 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); font-size: 12px; }
+.pretestbar h3, .pretestbar p { margin: 0; }
+.pretestbar h3 { font-size: 12px; }
+.pretestbar p:empty { display: none; }
+.pretestbar label { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pretestbar input { width: 180px; max-width: 100%; padding: 4px 6px; }
+#pretestprogress { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); align-items: center; }
+#pretestbar { width: 100%; accent-color: var(--blue); }
 .camerapath { overflow-wrap: anywhere; font-size: 11px; color: #647586; }
-.camera-shortcuts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.camera-shortcuts span { color: #647586; font-size: 11px; }
-#side-config, #d405-config { border: 0; padding: 0; margin: 0; min-width: 0; }
-#side-config details { margin-top: 5px; }
-#side-apply { margin-top: 8px; }
-
-#consolepage { display: flex; flex-direction: column; min-height: calc(100vh - 165px); margin-top: 0; }
-#consolepage .consolebody { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-#consoleoutput { flex: 1; height: auto; min-height: 260px; }
-.consolebody .pretestbar { margin: 0 0 14px; }
-.pretestbar > .commandrow { margin-top: 0; }
-.command-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-.command-presets button { padding: 6px 9px; font-size: 11px; }
 
 @media (max-width: 900px) {
   .topcontrols { gap: 8px; }
-  .overviewcards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #consoleoutput { min-height: 180px; }
 }
 @media (max-width: 620px) {
   .topcontrols { gap: 5px; }
+  .overviewcards, #pretestprogress { grid-template-columns: minmax(0, 1fr); }
   .hardwarelabel { display: none; }
   .servicestatus { display: grid; gap: 2px; padding: 3px 5px; }
   #heartbeatstatus { border: 0; padding-left: 0; }

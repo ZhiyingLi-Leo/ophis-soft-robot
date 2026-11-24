@@ -1,5 +1,3 @@
-import { createCameraShape } from './camera-shape.js';
-
 const $=selector=>document.querySelector(selector);
 export const fullFrameRoi=[0,0,1,1];
 const sameRoi=(a,b)=>!!a&&!!b&&a.every((value,i)=>value===b[i]);
@@ -111,21 +109,17 @@ export function installRoiDrag(image, box, {enabled, onSelection, onDrag=()=>{}}
   };
 }
 
-export function setupCamera(act, showProgress){
+export function setupCamera(act){
   let state=null,settingsRoi;
   let setup=false,applied=null,drawing=false,previewSettings=null,confirming=false,experimentRunning=false,axesReady=false;
-  let listing=false,connecting=false,configuring=false,serialRequired=false,notice='',settingsSignature='';
+  let listing=false,connecting=false,configuring=false,serialRequired=false,notice='';
   const image=$('#cpreview'), box=$('#cropbox'), select=$('#cdevices');
-  const card=$('#d405-card'), shapeDrawer=$('#cameraShapeDrawer');
-  const shapePanel=$('#cameraShapePanel');
-  let shapeView=null, webglFailed=false;
-  const roiIds=['cx0','cy0','cx1','cy1'];
   const device=(operation,arguments_={})=>act('device',{device:'camera.d405',operation,arguments:arguments_});
   const connected=()=>state?.online||['连接中','等待首帧'].includes(state?.status);
   const cameraFresh=()=>state?.online&&state.frame_age!==null&&state.frame_age<2;
   const canConfigure=()=>!!state&&!experimentRunning&&!state.recording&&!configuring&&!confirming;
   const preview=setupCameraPreview({
-    image,card,placeholder:$('#cplaceholder'),endpoint:'/api/camera/preview',
+    image,card:$('#d405-card'),placeholder:$('#cplaceholder'),endpoint:'/api/camera/preview',
     toggle:$('#czoom'),reset:$('#cresetroi'),hint:$('#czoomhint'),
     onReset:roi=>updateSettings('configure',{roi}),
     onLoad:settings=>{previewSettings=settings;renderPretest();}
@@ -137,7 +131,6 @@ export function setupCamera(act, showProgress){
     $('#cconnect').textContent=active?'断开 D405':'接入 D405';
     $('#cconnect').disabled=!state||experimentRunning||connecting||state.status==='正在断开'
       ||(!active&&(listing||(serialRequired&&!select.value)));
-    $('#d405-config').disabled=!canConfigure();
     $('#clocate').disabled=!canConfigure()||!cameraFresh()||state.frame_age>=1||connecting;
     $('#crecord').disabled=experimentRunning||!cameraFresh()||state.recording;
     $('#crecordstop').disabled=experimentRunning||!state?.recording;
@@ -171,7 +164,7 @@ export function setupCamera(act, showProgress){
       else await device('connect',{serial:select.value});
     }finally{connecting=false;controls();}
   };
-  $('#crecord').onclick=()=>device('record_start',{label:$('#clabel').value.trim()});
+  $('#crecord').onclick=()=>device('record_start');
   $('#crecordstop').onclick=()=>device('record_stop');
   async function updateSettings(operation,args,autoZoom=false){
     configuring=true;applied=null;notice='';controls();renderPretest();
@@ -180,38 +173,25 @@ export function setupCamera(act, showProgress){
       const result=await device(operation,args);
       if(result?.settings){
         applied=result.settings;
-        syncSettings(true,applied);
+        settingsRoi=applied.roi;
         changed=true;
       }
     }finally{configuring=false;controls(changed&&autoZoom);renderPretest();}
   }
-  function apply(autoZoom=false){
-    if(!canConfigure())return;
-    const settings={
-      roi:roiIds.map(id=>$('#'+id).valueAsNumber/100),
-      white_min:$('#cwhite').valueAsNumber,white_sat:$('#csat').valueAsNumber
-    };
-    applied=null;
-    if(![...settings.roi,settings.white_min,settings.white_sat].every(Number.isFinite)){
-      notice='请填写全部 ROI 和颜色参数。';controls();renderPretest();return;
-    }
-    return updateSettings('configure',settings,autoZoom);
-  }
   $('#clocate').onclick=()=>{if(!$('#clocate').disabled)return updateSettings('auto_locate',{},true);};
-  $('#capply').onclick=()=>apply();
-  for(const id of [...roiIds,'cwhite','csat'])$('#'+id).oninput=()=>{applied=null;renderPretest();};
   $('#pretestlimit').oninput=renderPretest;
-  $('#pretestcancel').onclick=()=>{setup=false;renderPretest();showProgress();};
+  $('#pretestcancel').onclick=()=>{setup=false;renderPretest();$('#pretestopen').focus();};
   $('#pretestconfirm').onclick=async()=>{
     if($('#pretestconfirm').disabled)return;
     confirming=true;controls();renderPretest();
     const started=await act('pretest_start',{settings:state.settings,max_advance_mm:$('#pretestlimit').valueAsNumber});
     confirming=false;
-    if(started){setup=false;showProgress();}
+    if(started)setup=false;
     controls();renderPretest();
   };
   function renderPretest(){
     $('#pretestsetup').hidden=!setup;
+    $('#pretestopen').setAttribute('aria-expanded',String(setup));
     if(!setup)return;
     const current=cameraFresh()&&state.frame_age<1;
     const settingsMatch=applied&&state&&Object.entries(applied).every(([key,value])=>
@@ -222,12 +202,12 @@ export function setupCamera(act, showProgress){
     let hint='';
     if(!current)hint='接入 D405 并等待新鲜图像。';
     else if(configuring)hint='正在应用识别参数。';
-    else if(!applied)hint='自动定位、在图像上拖框，或输入边界后应用参数。';
+    else if(!applied)hint='请在 D405 预览上拖框或点击「自动定位导管」。';
     else if(!settingsMatch)hint='等待新识别区域的预览。';
     else if(!state.measurement?.shape_3d?.valid)hint=state.measurement?.shape_3d?.reason||'等待有效三维中心线。';
     else if(!axesReady)hint='请接入三根电缸，确认反馈有效且电缸静止。';
     else if(!(limit>=4&&limit<=48))hint='确认组合路径后，填写现场允许的总推进量上限。';
-    $('#pretestready').textContent=hint||'三维测量有效，请检查中心线和夹角后确认。';
+    $('#pretestready').textContent=hint||'三维测量有效，请检查预览中的根部、尖端及弯曲角后确认。';
     $('#pretestconfirm').disabled=!!hint||confirming||experimentRunning||state.recording||!!drawing;
   }
   installRoiDrag(image, box, {
@@ -235,61 +215,34 @@ export function setupCamera(act, showProgress){
     onDrag:active=>{drawing=active;renderPretest();},
     onSelection:bounds=>{
       if(!bounds){notice='区域宽高至少占画面的 5%，请重新拖框。';controls();return;}
-      bounds.forEach((value,i)=>$('#'+roiIds[i]).value=(value*100).toFixed(2));
-      apply(true);
+      return updateSettings('configure',{roi:bounds},true);
     }
   });
   const num=(v,d=1)=>Number.isFinite(v)?v.toFixed(d):'—';
-  function renderShape(s, fresh){
-    const page=document.body.dataset.page;
-    const showProgress=page==='console'&&s?.experiment?.status==='running'&&s.experiment.pretest;
-    const slot=showProgress?$('#pretestShapeSlot'):$('#cameraShapeSlot');
-    if(shapePanel.parentElement!==slot)slot.append(shapePanel);
-    if(!showProgress&&(page!=='camera'||card.hidden||!shapeDrawer.open))return;
-    const shape=fresh?s.camera.measurement?.shape_3d:null;
-    if(!shapeView&&!webglFailed){
-      try {shapeView=createCameraShape($('#cameraShapeCanvas'));}
-      catch {webglFailed=true;$('#cameraShapeCanvas').hidden=true;}
-    }
-    $('#cameraShapeStatus').textContent=webglFailed?'三维视图需要浏览器 WebGL 支持':shape?.valid?'':(shape?.reason||'等待有效三维中心线');
-    shapeView?.update(shape,s?.camera.frame_number);
-  }
-  function syncSettings(force=false,settings=state?.settings){
-    if(!settings)return;
-    const signature=JSON.stringify(settings);
-    if(!force&&signature===settingsSignature)return;
-    settingsSignature=signature;
-    settingsRoi=settings.roi;
-    settings.roi.forEach((v,i)=>$('#'+roiIds[i]).value=+(v*100).toFixed(4));
-    $('#cwhite').value=settings.white_min;$('#csat').value=settings.white_sat;
-  }
   function render(s){
     const c=state=s?.camera;
+    settingsRoi=c?.settings?.roi;
+    experimentRunning=['running','stopping'].includes(s?.experiment?.status);
+    axesReady=s?.axes.every(a=>a.online&&!a.error&&!a.moving&&a.age!==null&&a.age<1);
+    controls();
     if(!c){
-      controls();$('#cstatus').textContent='服务离线';$('#cstatus').className='status';
-      renderPretest();renderShape(null,false);return;
+      $('#cstatus').textContent='服务离线';$('#cstatus').className='status';
+      renderPretest();return;
     }
-    const running=['running','stopping'].includes(s.experiment?.status);
-    experimentRunning=running;
-    axesReady=s.axes.every(a=>a.online&&!a.error&&!a.moving&&a.age!==null&&a.age<1);
     const fresh=cameraFresh();
-    syncSettings();controls();
     $('#cstatus').textContent=c.error?'故障':c.status;
     $('#cstatus').className='status '+(c.error?'error':fresh?'ready':'');
-    const missing=Object.entries(c.dependencies).filter(([,v])=>!v).map(([k])=>k);$('#cdeps').textContent=missing.length?'缺少 '+missing.join('、'):'已就绪';
     $('#cframes').textContent=String(c.processed_frames);$('#cage').textContent=Number.isFinite(c.frame_age)?num(c.frame_age,2)+' s':'—';
     const shape=fresh?c.measurement?.shape_3d:null;
     $('#csurface').textContent=shape?.valid?num(shape.angle_deg)+'°':'—';
     $('#cdepth').textContent=fresh?`${shape?.observed_indices?.length??0} / 21`:'—';
     $('#crecordstate').textContent=c.recording?'记录中 · '+c.recorded_frames+' 帧':c.recorded_frames?'已记录 · '+c.recorded_frames+' 帧':'未记录';
-    $('#csession').textContent=c.session_path||'记录将在本机 data/ 下创建实验目录';
+    $('#crecordstate').title=c.session_path||'';
     preview.render(c.frame_number,c.calibration?.serial);
     renderPretest();
-    renderShape(s,fresh);
   }
   return {render,beginPretest(){
-    setup=true;applied=null;$('#pretestlimit').value='';shapeDrawer.open=true;
-    syncSettings(true);
+    setup=true;applied=null;$('#pretestlimit').value='';
     renderPretest();
   }};
 }
