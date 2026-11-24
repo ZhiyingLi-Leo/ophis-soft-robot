@@ -53,21 +53,36 @@
 .dot.partial { background: #fff; border: 1px solid var(--blue); }
 .modulelink.selected { background: #e9f0f7; color: #234f76; }
 .modulelink small { color: #637485; }
-#navconsole { margin-top: 4px; }
-.sidebar { padding-block: 20px 16px; }
-.sidebar .sideheading { margin-bottom: 12px; }
-.treeparent { margin-bottom: 12px; }
-.portsheading { margin-top: 16px; padding-top: 12px; }
-.devices { max-height: min(16vh, 145px); overflow: auto; }
-.devices .empty { margin: 0; padding: 6px 4px; }
-.sidehint { margin: 8px 0; }
+#navconsole { margin-top: 2px; }
+.sidebar { padding-block: 14px 12px; }
+.sidebar .sideheading { margin-bottom: 8px; }
+.treeparent { margin-bottom: 8px; }
+.modulelink { padding: 6px 5px; }
+.modulelink small { margin-top: 2px; }
+.axistree { padding: 2px 0 6px 26px; }
+.axisnav { padding: 5px 5px; }
+.portsheading { margin-top: 10px; padding-top: 10px; }
+.devices { max-height: min(15vh, 130px); overflow: auto; }
+.devices .empty { margin: 0; padding: 4px; }
+.sidehint { margin: 6px 0; line-height: 1.5; }
 
-.gamepadpanel { margin-top: 14px; padding: 9px; }
+.gamepadpanel { margin-top: 10px; padding: 8px; }
 .gamepadpanel h2 { margin: 0; font-size: 12px; }
-#gpstatus { display: block; margin: 6px 0; color: #647586; font-size: 11px; }
+#gpstatus { display: block; margin: 4px 0 6px; color: #647586; font-size: 11px; }
 .gamepadactions { display: flex; gap: 5px; }
 .gamepadactions button { flex: 1; padding: 4px 6px; font-size: 11px; }
-.sidebarbottom { padding-top: 20px; }
+.sidebarbottom { padding-top: 10px; }
+.sidebarbottom p { margin: 3px 0; }
+@media (min-width: 901px) {
+  .sidebar {
+    position: sticky;
+    top: 66px;
+    height: calc(100vh - 66px);
+    min-height: 0;
+    overflow-y: auto;
+    align-self: start;
+  }
+}
 
 .overviewcards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
 .summarycard { display: grid; align-content: start; gap: 8px; min-width: 0; padding: 13px; text-align: left; }
