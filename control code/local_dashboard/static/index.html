@@ -28,7 +28,7 @@
       <div class="camerapreview">
         <img id="cpreview" alt="D405 柔性段轮廓实时预览" draggable="false" hidden>
         <div id="cropbox" class="roi-box" hidden></div>
-        <div class="camera-placeholder" id="cplaceholder"><b>等待 D405 图像</b><span>接入后可拖框选取识别区域。</span></div>
+        <div class="camera-placeholder" id="cplaceholder"><b>等待 D405 图像</b><span>接入后可自动定位或拖框选取识别区域。</span></div>
       </div>
       <div class="camerametrics">
         <div><span>三维弯曲角</span><b id="csurface">—</b></div>
@@ -36,13 +36,14 @@
         <div><span>图像年龄 / 处理帧数</span><b><small id="cage">—</small> / <small id="cframes">0</small></b></div>
       </div>
       <div class="camera-quick">
+        <button id="clocate" type="button" disabled>自动定位导管</button>
         <button class="primary" id="crecord" type="button" disabled>开始记录</button><button id="crecordstop" type="button" disabled>结束记录</button>
         <span id="crecordstate">未记录</span>
       </div>
       <p id="cerror" class="axiserror camera-error" role="status"></p>
       <div id="pretestsetup" class="pretestbar" hidden>
         <h3>Pre-test 识别预览</h3>
-        <p>在图像上拖框，包含橙色近端和白色柔性段的活动范围。确认根部、尖端和三维中心线正确后开始。</p>
+        <p>自动定位或拖框时，确保识别区域包含橙色近端和白色柔性段的活动范围。确认根部、尖端和三维中心线后开始。</p>
         <label>现场确认的三轴推进增量之和上限（mm）
           <input id="pretestlimit" aria-label="三轴推进增量之和上限" type="number" min="4" max="48" step="any" placeholder="最大采样点需要 4 mm">
         </label>

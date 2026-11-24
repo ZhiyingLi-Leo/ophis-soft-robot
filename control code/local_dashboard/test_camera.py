@@ -282,6 +282,56 @@ class VisionTests(unittest.TestCase):
         cv2.rectangle(image,(71,110),(250,130),(220,220,220),-1)
         return image
 
+    def test_catheter_and_d405_auto_locate_in_lab_clutter(self):
+        import cv2
+        import numpy as np
+        from device_plugins.vision import analyze
+
+        image = np.full((240, 320, 3), (112, 100, 75), dtype=np.uint8)
+        cv2.rectangle(image, (12, 5), (116, 184), (72, 104, 140), -1)
+        image[185:] = (245, 245, 245)
+        cv2.line(image, (222, 22), (222, 83), (0, 126, 240), 8)
+        cv2.line(image, (222, 84), (222, 128), (237, 237, 237), 8)
+        depth = np.zeros(image.shape[:2], np.uint16)
+
+        def assert_catheter(measured):
+            self.assertTrue(measured['valid'], measured['reason'])
+            np.testing.assert_allclose(np.array(measured['curve_px'])[[0, -1]], [[222, 83], [222, 132]], atol=4)
+            self.assertAlmostEqual(measured['projected_theta_deg'], 0, delta=5)
+            x0, y0, x1, y1 = measured['catheter_bounds_px']
+            self.assertTrue(210 < x0 < x1 < 235 and 10 < y0 < 25 and 128 < y1 < 140)
+
+        with tempfile.TemporaryDirectory() as root:
+            camera = D405Device(root, lambda: {})
+            full = camera.snapshot()['settings']
+            assert_catheter(analyze(image, None, full)[0])
+            with self.assertRaisesRegex(ValueError, '新鲜图像'):
+                camera.command('auto_locate', {})
+            original_roi = [.01, .01, .4, .9]
+            camera.command('configure', {'roi': original_roi})
+            info = dict(host_receive_monotonic=time.monotonic(), frame_number=1)
+            captured = image.copy()
+            camera._publish(captured, depth, depth, .001, None, info, None)
+            captured[:] = 0  # The retained raw frame must survive reuse of the capture buffer.
+            self.assertFalse(camera.snapshot()['measurement']['valid'])
+            camera.record_start('roi lock')
+            with self.assertRaisesRegex(ValueError, '停止记录'):
+                camera.command('auto_locate', {})
+            camera.stop_recording('test')
+            self.assertEqual(camera.snapshot()['settings']['roi'], original_roi)
+            result = camera.command('auto_locate', {})
+            self.assertEqual(result['settings'], camera.snapshot()['settings'])
+            self.assertGreater(result['settings']['roi'][0], .25)
+            self.assertLess(result['settings']['roi'][3], .8)
+            assert_catheter(analyze(image, None, result['settings'])[0])
+            with patch('device_plugins.realsense.time.monotonic', return_value=info['host_receive_monotonic']+2):
+                with self.assertRaisesRegex(ValueError, '新鲜图像'):
+                    camera.command('auto_locate', {})
+            camera.disconnect()
+            self.assertIsNone(camera.color)
+            with self.assertRaisesRegex(ValueError, '新鲜图像'):
+                camera.command('auto_locate', {})
+
     def test_straight_curve_and_invalid_depth_are_separate(self):
         import numpy as np
         from device_plugins.vision import analyze

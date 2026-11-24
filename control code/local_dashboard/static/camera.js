@@ -66,6 +66,7 @@ export function setupCamera(act, showProgress){
     $('#cconnect').disabled=!state||experimentRunning||connecting||state.status==='正在断开'
       ||(!active&&(listing||(serialRequired&&!select.value)));
     $('#d405-config').disabled=!canConfigure();
+    $('#clocate').disabled=!canConfigure()||!cameraFresh()||state.frame_age>=1||connecting;
     $('#crecord').disabled=experimentRunning||!cameraFresh()||state.recording;
     $('#crecordstop').disabled=experimentRunning||!state?.recording;
     image.classList.toggle('drawing-enabled',cameraFresh()&&canConfigure());
@@ -100,7 +101,17 @@ export function setupCamera(act, showProgress){
   };
   $('#crecord').onclick=()=>device('record_start',{label:$('#clabel').value.trim()});
   $('#crecordstop').onclick=()=>device('record_stop');
-  async function apply(){
+  async function updateSettings(operation,args){
+    configuring=true;applied=null;notice='';controls();renderPretest();
+    try{
+      const result=await device(operation,args);
+      if(result?.settings){
+        applied=result.settings;
+        syncSettings(true,applied);
+      }
+    }finally{configuring=false;controls();renderPretest();}
+  }
+  function apply(){
     if(!canConfigure())return;
     const settings={
       roi:roiIds.map(id=>$('#'+id).valueAsNumber/100),
@@ -110,11 +121,9 @@ export function setupCamera(act, showProgress){
     if(![...settings.roi,settings.white_min,settings.white_sat].every(Number.isFinite)){
       notice='请填写全部 ROI 和颜色参数。';controls();renderPretest();return;
     }
-    configuring=true;notice='';controls();renderPretest();
-    try{
-      if(await device('configure',settings))applied=settings;
-    }finally{configuring=false;controls();renderPretest();}
+    return updateSettings('configure',settings);
   }
+  $('#clocate').onclick=()=>{if(!$('#clocate').disabled)return updateSettings('auto_locate');};
   $('#capply').onclick=apply;
   for(const id of [...roiIds,'cwhite','csat'])$('#'+id).oninput=()=>{applied=null;renderPretest();};
   $('#pretestlimit').oninput=renderPretest;
@@ -139,7 +148,7 @@ export function setupCamera(act, showProgress){
     let hint='';
     if(!current)hint='接入 D405 并等待新鲜图像。';
     else if(configuring)hint='正在应用识别参数。';
-    else if(!applied)hint='在图像上拖框，或输入边界后应用参数。';
+    else if(!applied)hint='自动定位、在图像上拖框，或输入边界后应用参数。';
     else if(!settingsMatch)hint='等待新识别区域的预览。';
     else if(!state.measurement?.shape_3d?.valid)hint=state.measurement?.shape_3d?.reason||'等待有效三维中心线。';
     else if(!axesReady)hint='请接入三根电缸，确认反馈有效且电缸静止。';
@@ -192,13 +201,13 @@ export function setupCamera(act, showProgress){
     $('#cameraShapeStatus').textContent=webglFailed?'三维视图需要浏览器 WebGL 支持':shape?.valid?'':(shape?.reason||'等待有效三维中心线');
     shapeView?.update(shape,s?.camera.frame_number);
   }
-  function syncSettings(force=false){
-    if(!state)return;
-    const signature=JSON.stringify(state.settings);
+  function syncSettings(force=false,settings=state?.settings){
+    if(!settings)return;
+    const signature=JSON.stringify(settings);
     if(!force&&signature===settingsSignature)return;
     settingsSignature=signature;
-    state.settings.roi.forEach((v,i)=>$('#'+roiIds[i]).value=+(v*100).toFixed(4));
-    $('#cwhite').value=state.settings.white_min;$('#csat').value=state.settings.white_sat;
+    settings.roi.forEach((v,i)=>$('#'+roiIds[i]).value=+(v*100).toFixed(4));
+    $('#cwhite').value=settings.white_min;$('#csat').value=settings.white_sat;
   }
   function render(s){
     const c=state=s?.camera;

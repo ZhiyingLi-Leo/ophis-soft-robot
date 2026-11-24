@@ -37,19 +37,48 @@ class UvcTests(unittest.TestCase):
         self.device._publish(dict(host_receive_monotonic=stamp,frame_number=number,fps=fps), color)
 
     def test_rgb_signed_angle_and_color_failure(self):
-        for direction in (-1,0,1):
-            result, overlay = vision.analyze_rgb(catheter(24*direction), self.device.settings)
-            self.assertTrue(result['valid'])
-            self.assertEqual(len(result['curve_px']),21)
-            self.assertEqual(overlay.shape,(180,320,3))
-            if direction:
-                self.assertGreater(result['angle_deg']*direction,18)
-            else:
-                self.assertAlmostEqual(result['angle_deg'],0,delta=4)
+        for direction in (-1, 0, 1):
+            for left_pointing in (False, True):
+                with self.subTest(direction=direction, left_pointing=left_pointing):
+                    color = catheter(24*direction)
+                    if left_pointing:
+                        color = cv2.flip(color, 1)
+                    result, overlay = vision.analyze_rgb(color, self.device.settings)
+                    self.assertTrue(result['valid'])
+                    self.assertEqual(len(result['curve_px']),21)
+                    self.assertEqual(overlay.shape,(180,320,3))
+                    self.assertEqual(result['curve_px'][-1][0] < result['curve_px'][0][0], left_pointing)
+                    if direction:
+                        self.assertGreater(result['angle_deg']*direction,18)
+                    else:
+                        self.assertAlmostEqual(result['angle_deg'],0,delta=4)
         settings = dict(self.device.settings, orange_min=[100,80,55],orange_max=[120,255,255])
         result, _ = vision.analyze_rgb(catheter(24), settings)
         self.assertFalse(result['valid'])
         self.assertIsNone(result['angle_deg'])
+
+    def test_rgb_auto_locate_selects_catheter_on_cardboard_above_white_desk(self):
+        color = cv2.flip(catheter(), 1)
+        background = np.all(color == (55, 115, 20), axis=2)
+        background[:5] = background[136:] = False
+        background[:, :80] = background[:, 284:] = False
+        color[background] = (72, 104, 140)
+        color[136:] = (245, 245, 245)
+
+        def assert_catheter(measured):
+            self.assertTrue(measured['valid'], measured['reason'])
+            np.testing.assert_allclose(np.array(measured['curve_px'])[[0, -1]], [[225, 90], [131, 90]], atol=6)
+            self.assertAlmostEqual(measured['angle_deg'], 0, delta=5)
+            x0, y0, x1, y1 = measured['catheter_bounds_px']
+            self.assertTrue(125 < x0 < 145 and 260 < x1 < 275 and 80 < y0 < y1 < 105)
+
+        assert_catheter(vision.analyze_rgb(color, self.device.settings)[0])
+        self.device.command('configure', {'roi': [.01, .05, .3, .8]})
+        self.publish(color, time.monotonic())
+        self.assertFalse(self.device.snapshot()['measurement']['valid'])
+        settings = self.device.command('auto_locate', {})['settings']
+        self.assertGreater(settings['roi'][0], .15)
+        assert_catheter(vision.analyze_rgb(color, settings)[0])
 
     def test_1080p_full_frame_analysis_preview_and_auto_roi(self):
         color = catheter(22, (1920, 1080))

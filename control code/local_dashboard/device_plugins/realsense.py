@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import macos_camera
-from .vision import analyze
+from .vision import analyze, locate_roi
 from .shape3d import BendDirectionHistory
 
 
@@ -37,7 +37,7 @@ def _d405_devices(rs):
 class D405Device:
     kind='camera'
     key='camera.d405'
-    operations=('connect','disconnect','configure','record_start','record_stop','annotate')
+    operations=('connect','disconnect','configure','auto_locate','record_start','record_stop','annotate')
 
     def __init__(self, data_root, telemetry):
         self.lock=threading.RLock()
@@ -45,7 +45,7 @@ class D405Device:
         self.telemetry=telemetry
         self.halt=threading.Event();self.thread=None
         self.bridge_process = self.bridge_connection = None
-        self.jpeg=None;self.recording=None
+        self.color=self.jpeg=None;self.recording=None
         self.bend_history=BendDirectionHistory()
         self.settings=dict(roi=[0.,0.,1.,1.],white_min=85,white_sat=100,length_mm=30.,diameter_mm=6.)
         self.status=dict(online=False,name='RealSense D405',status='未接入',error='',last_frame_time=None,
@@ -77,8 +77,16 @@ class D405Device:
 
     def preview(self, *, with_settings=False):
         with self.lock:
-            if not self.status['online'] or self.status['last_frame_time'] is None or time.monotonic()-self.status['last_frame_time']>2:return None
+            if not self._fresh(2):return None
             return (self.jpeg, self.status['measurement_settings']) if with_settings and self.jpeg else self.jpeg
+
+    def _fresh(self, seconds=1):
+        stamp = self.status['last_frame_time']
+        return self.status['online'] and stamp is not None and time.monotonic()-stamp <= seconds
+
+    def _require_configurable(self):
+        if self.recording is not None:
+            raise ValueError('请先停止记录再修改识别参数')
 
     def command(self, operation, args, context=None):
         if operation not in self.operations:raise ValueError('相机不支持此操作')
@@ -86,7 +94,7 @@ class D405Device:
         if operation=='disconnect':return self.disconnect()
         if operation=='configure':
             with self.lock:
-                if self.recording:raise ValueError('请先停止记录再修改识别参数')
+                self._require_configurable()
                 settings=copy.deepcopy(self.settings)
                 if 'roi' in args:
                     roi=args['roi']
@@ -100,6 +108,7 @@ class D405Device:
                         settings[key]=v
                 self.settings=settings
                 return {'settings':copy.deepcopy(settings)}
+        if operation=='auto_locate':return self.auto_locate()
         if operation=='record_start':return self.record_start(args.get('label',''),args.get('group'))
         if operation=='record_stop':self.stop_recording('用户结束记录');return
         if operation=='annotate':
@@ -110,6 +119,26 @@ class D405Device:
                 self.recording['index'].write(json.dumps(dict(kind='annotation',host_monotonic=time.monotonic(),note=note),ensure_ascii=False)+'\n')
                 self.recording['index'].flush()
 
+    def auto_locate(self):
+        return self.apply_auto_roi(self.roi_candidate())
+
+    def roi_candidate(self):
+        with self.lock:
+            self._require_configurable()
+            if not self._fresh() or self.color is None:
+                raise ValueError('请先接入 D405 并等待新鲜图像')
+            settings, color, connection = self.settings, self.color, self.halt
+        return settings, connection, locate_roi(color, settings)
+
+    def apply_auto_roi(self, candidate):
+        settings, connection, roi = candidate
+        with self.lock:
+            self._require_configurable()
+            if settings is not self.settings or connection is not self.halt or not self._fresh():
+                raise ValueError('D405 相机或设置已变化，请重新自动定位')
+            self.settings = dict(settings, roi=roi)
+            return {'settings':copy.deepcopy(self.settings)}
+
     def connect(self, serial=''):
         if not isinstance(serial,str) or len(serial)>100:raise ValueError('相机序列号无效')
         missing=[k for k,v in dependencies().items() if not v]
@@ -118,7 +147,7 @@ class D405Device:
             if self.thread and self.thread.is_alive():raise ValueError('相机正在连接或运行，请等待或先断开')
             if self.bridge_process is not None and self.bridge_process.poll() is None:
                 raise ValueError('上一次自动启动的 D405 桥接尚未退出')
-            self.halt=threading.Event();self.jpeg=None
+            self.halt=threading.Event();self.color=self.jpeg=None
             self.bend_history=BendDirectionHistory()
             self.status.update(status='连接中',error='',measurement=None,last_frame_time=None)
             self.thread=threading.Thread(target=self._capture,args=(serial,),daemon=True)
@@ -128,7 +157,7 @@ class D405Device:
         with self.lock:
             self.halt.set()
             self.status.update(online=False,status='正在断开',measurement=None)
-            self.jpeg=None
+            self.color=self.jpeg=None
             if self.bridge_connection is not None:
                 try:
                     self.bridge_connection.shutdown(socket.SHUT_RDWR)
@@ -146,7 +175,7 @@ class D405Device:
         if group is not None and (not isinstance(group,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}',group)):
             raise ValueError('实验分组名称无效')
         with self.lock:
-            if not self.status['online'] or self.status['last_frame_time'] is None or time.monotonic()-self.status['last_frame_time']>1:
+            if not self._fresh():
                 raise ValueError('相机没有新鲜图像')
             if self.recording:raise ValueError('相机已经在记录')
             self.data_root.mkdir(parents=True,exist_ok=True)
@@ -311,7 +340,7 @@ class D405Device:
                 except Exception:pass
             self.stop_recording('相机采集结束')
             with self.lock:
-                self.status['online']=False;self.jpeg=None
+                self.status['online']=False;self.color=self.jpeg=None
                 if self.halt.is_set():self.status['status']='未接入'
 
     def _publish(self,color,native,aligned_array,scale,intr,info,rs):
@@ -335,6 +364,7 @@ class D405Device:
         if not ok:raise RuntimeError('图像编码失败')
         with self.lock:
             if self.halt.is_set():return
+            self.color=color.copy()
             self.jpeg=jpeg.tobytes()
             self.status.update(online=True,status='采集中',error='',last_frame_time=info['host_receive_monotonic'],
                                frame_number=info['frame_number'],measurement=measured,measurement_settings=settings)

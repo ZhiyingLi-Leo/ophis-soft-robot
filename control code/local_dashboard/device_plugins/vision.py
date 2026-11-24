@@ -23,7 +23,145 @@ def thin(mask):
     return image[1:-1,1:-1]*255
 
 
-def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconstruct):
+def _components(mask, max_area, *, rod=False):
+    import cv2
+    import numpy as np
+
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    parts = []
+    for label, (x, y, width, height, area) in enumerate(stats[1:], 1):
+        if not (10 if rod else 30) <= area <= max_area:
+            continue
+        rows, cols = np.where(labels[y:y+height, x:x+width] == label)
+        pixels = np.column_stack((cols+x, rows+y))
+        center, (across, along), angle = cv2.minAreaRect(pixels.astype(np.float32))
+        if across > along:
+            across, along = along, across
+            angle -= 90
+        length = along + 1
+        thickness = area / length
+        if length < (8 if rod else 10) or length < (1.55 if rod else 2.) * thickness:
+            continue
+        if rod and (across+1 > length/1.5 or across+1 > 2.4*thickness):
+            continue
+        # Cropping a desk or box can leave an apparently narrow strip along the ROI edge.
+        if any(np.count_nonzero(coords == edge) > .65*length for coords, edge in
+               ((pixels[:, 0], 0), (pixels[:, 0], mask.shape[1]-1),
+                (pixels[:, 1], 0), (pixels[:, 1], mask.shape[0]-1))):
+            continue
+        theta = math.radians(angle)
+        axis = np.array([-math.sin(theta), math.cos(theta)])
+        ends = np.array(center) + np.array([[-1], [1]]) * along/2 * axis
+        parts.append((pixels, thickness, ends))
+    return parts
+
+
+def _best_pair(rods, tips, saturation):
+    import numpy as np
+
+    best = None
+    for shaft, rod_width, ends in rods:
+        rod_strength = float(saturation[shaft[:, 1], shaft[:, 0]].mean()) / 255
+        for tip, tip_width, _ in tips:
+            width = max(rod_width, tip_width)
+            ratio = width / min(rod_width, tip_width)
+            if ratio > 2.8:
+                continue
+            for joint, back in (ends, ends[::-1]):
+                offsets = tip-joint
+                gap = np.linalg.norm(offsets, axis=1).min()
+                if gap > max(4., 1.15*width):
+                    continue
+                axis = (joint-back)/np.linalg.norm(joint-back)
+                forward = offsets @ axis
+                start = forward.min()
+                if np.median(forward) <= 0 or start < -width:
+                    continue
+                near_joint = offsets[forward <= start + 2*width]
+                lateral = np.abs(near_joint @ np.array([-axis[1], axis[0]])).mean()
+                score = (gap + lateral)/width + math.log(ratio) - rod_strength
+                if best is None or score < best[0]:
+                    best = (score, shaft, tip, joint, back, rod_width)
+    return best
+
+
+def _catheter(hsv, settings, frame_area):
+    import cv2
+    import numpy as np
+
+    orange_min = settings.get('orange_min', [3, 85, 55])
+    orange_max = tuple(settings.get('orange_max', [27, 255, 255]))
+    white_min = settings['white_min']
+    kernel = np.ones((3, 3), np.uint8)
+    max_area = .2 * frame_area
+    best = None
+    best_rods = []
+    # A brighter white mask separates the tube from dim reflections and the mat.
+    # A more saturated orange mask can separate the shaft from cardboard at its edge.
+    orange_levels = [orange_min[1]]
+    if orange_min[1] < 200 <= orange_max[1]:
+        orange_levels.append(200)
+    previous_orange = None
+    for saturation in orange_levels:
+        orange = cv2.inRange(hsv, (orange_min[0], saturation, orange_min[2]), orange_max)
+        if np.array_equal(orange, previous_orange):
+            continue
+        previous_orange = orange
+        rods = _components(orange, max_area, rod=True)
+        if not rods:
+            continue
+        previous_white = None
+        for level in dict.fromkeys((white_min, max(white_min, 130))):
+            white = cv2.inRange(hsv, (0, 0, level), (179, settings['white_sat'], 255))
+            white[orange > 0] = 0
+            if np.array_equal(white, previous_white):
+                continue
+            previous_white = white
+            tips = _components(cv2.morphologyEx(white, cv2.MORPH_CLOSE, kernel), max_area)
+            candidate = _best_pair(rods, tips, hsv[:, :, 1])
+            if candidate is not None and (best is None or candidate[0] < best[0]):
+                best, best_rods = candidate, rods
+    if best is None:
+        return None
+
+    _, shaft, tip, joint, back, rod_width = best
+    extent = [shaft, tip]
+    axis = (back-joint)/np.linalg.norm(back-joint)
+    cross = np.array([-axis[1], axis[0]])
+    # Include the proximal shaft beyond a narrow mounting clip in the ROI.
+    for fragment, width, ends in best_rods:
+        if fragment is shaft or not .4*rod_width <= width <= 2.5*rod_width:
+            continue
+        delta = ends-back
+        projected = delta @ axis
+        if (-rod_width <= projected.min() <= 5*rod_width and projected.max() > 0
+                and max(abs(delta @ cross)) <= max(3., rod_width, width)):
+            extent.append(fragment)
+    return shaft, tip, np.vstack(extent)
+
+
+def _end_tangent(stations, pixels, width):
+    import numpy as np
+
+    direction = stations[-1] - stations[0]
+    span = np.linalg.norm(direction)
+    if span < 1e-9:
+        return direction
+    axis = direction / span
+    normal = np.array([-axis[1], axis[0]])
+    half_step = max(.75, .5*span/(len(stations)-1))
+    # Refine the skeleton with transverse mask centroids before fitting each tangent.
+    # This averages out one-pixel steps and excludes the rounded ends.
+    centers = []
+    for station in stations:
+        offsets = pixels-station
+        band = pixels[(abs(offsets @ axis) <= half_step) & (abs(offsets @ normal) <= 1.5*width)]
+        centers.append(band.mean(axis=0) if len(band) else station)
+    weights = np.arange(len(stations)) - (len(stations)-1)/2
+    return weights @ np.asarray(centers)
+
+
+def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconstruct, side_view=False):
     import cv2
     import numpy as np
     h,w=color.shape[:2]
@@ -31,20 +169,6 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
     x0,y0,x1,y1=[int(v*n) for v,n in zip(roi,[w,h,w,h])]
     x1,y1=max(x0+1,x1),max(y0+1,y1)
     hsv=cv2.cvtColor(color[y0:y1,x0:x1],cv2.COLOR_BGR2HSV)
-    orange=np.zeros((h,w),np.uint8)
-    orange[y0:y1,x0:x1]=cv2.inRange(hsv,np.array(settings.get('orange_min',[3,85,55])),
-                                      np.array(settings.get('orange_max',[27,255,255])))
-    white=np.zeros((h,w),np.uint8)
-    white[y0:y1,x0:x1]=cv2.inRange(hsv,np.array([0,0,settings['white_min']]),
-                                     np.array([179,settings['white_sat'],255]))
-    if 'orange_min' in settings:
-        white[orange>0]=0
-    allowed=np.zeros((h,w),np.uint8);allowed[y0:y1,x0:x1]=255
-    orange &= allowed; white &= allowed
-    kernel=np.ones((3,3),np.uint8)
-    white=cv2.morphologyEx(white,cv2.MORPH_CLOSE,kernel)
-    if 'orange_min' in settings:
-        white &= allowed
     result=dict(valid=False, reason='未识别到橙色近端与白色柔性段', curve_px=[],
                 projected_theta_deg=None, projected_signed_deg=None, depth_fraction=0., surface_theta_deg=None,
                 surface_curve_camera_mm=[], coordinate_frame='camera',
@@ -52,22 +176,20 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
                 measurement='未标定的可见表面估计；非三维中心线真值')
     overlay=color.copy()
     cv2.rectangle(overlay,(x0,y0),(x1-1,y1-1),(160,160,160),1)
-    if np.count_nonzero(orange)<10: return result,overlay
-    distances=cv2.distanceTransform(255-orange,cv2.DIST_L2,3)
-    count,labels,stats,_=cv2.connectedComponentsWithStats(white)
-    candidates=[]
-    for label in range(1,count):
-        if stats[label,cv2.CC_STAT_AREA]<30: continue
-        region=labels==label
-        distance=float(distances[region].min())
-        if distance<=max(12,w*.04):candidates.append((distance,-stats[label,cv2.CC_STAT_AREA],label))
-    if not candidates: return result,overlay
-    label=min(candidates)[2]; mask=(labels==label).astype(np.uint8)*255
-    x,y,width,height=stats[label,:4]
+    selected = _catheter(hsv, settings, h*w)
+    if selected is None:
+        return result, overlay
+    shaft, tip_pixels, extent = (points+[x0, y0] for points in selected)
+    orange = np.zeros((h, w), np.uint8)
+    orange[shaft[:, 1], shaft[:, 0]] = 255
+    mask = np.zeros_like(orange)
+    mask[tip_pixels[:, 1], tip_pixels[:, 0]] = 255
+    x, y, width, height = cv2.boundingRect(tip_pixels)
     skeleton=thin(mask[y:y+height,x:x+width])
     yy,xx=np.nonzero(skeleton);points=set(zip((xx+x).tolist(),(yy+y).tolist()))
     if len(points)<8:return result,overlay
-    root=min(points,key=lambda p:float(distances[p[1],p[0]]))
+    distances = cv2.distanceTransform(255-orange, cv2.DIST_L2, 3)
+    root=min(points,key=lambda p:(float(distances[p[1],p[0]]),p))
     queue=deque([root]);parent={root:None};distance={root:0}
     while queue:
         p=queue.popleft()
@@ -96,26 +218,21 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
     def angle(a,b):
         norm=float(np.linalg.norm(a)*np.linalg.norm(b))
         return None if norm<1e-9 else float(np.degrees(np.arccos(np.clip(np.dot(a,b)/norm,-1,1))))
-    a,b=curve[4]-curve[0],curve[-1]-curve[-5]
+    a, b = curve[4]-curve[0], curve[-1]-curve[-5]
+    if side_view:
+        tube_width = len(tip_pixels) / lengths[-1]
+        a = _end_tangent(curve[1:8], tip_pixels, tube_width)
+        b = _end_tangent(curve[-8:-1], tip_pixels, tube_width)
     projected=angle(a,b)
     signed=math.degrees(math.atan2(a[0]*b[1]-a[1]*b[0],np.dot(a,b))) if projected is not None else None
+    if side_view and signed is not None and a[0] < 0:
+        signed = -signed
     result.update(valid=True,reason='二维轮廓已提取；深度需实物验证',curve_px=curve.tolist(),
                   projected_theta_deg=projected, projected_signed_deg=signed)
     cv2.circle(overlay,tuple(curve[0].astype(int)),4,(255,100,0),-1)
     cv2.circle(overlay,tuple(curve[-1].astype(int)),4,(0,0,255),-1)
     if depth_mm is None:
-        if 'orange_min' in settings:
-            _,_,orange_stats,_=cv2.connectedComponentsWithStats(orange)
-            root=np.asarray(curve[0])
-            local=[]
-            for index, (ox,oy,ow,oh,area) in enumerate(orange_stats[1:],1):
-                if area<10:continue
-                nearest=np.clip(root,[ox,oy],[ox+ow-1,oy+oh-1])
-                local.append((float(np.linalg.norm(root-nearest)),-area,index))
-            if local:
-                ox,oy,ow,oh=orange_stats[min(local)[2],:4]
-                result['catheter_bounds_px']=[int(v) for v in
-                    (min(x,ox),min(y,oy),max(x+width,ox+ow),max(y+height,oy+oh))]
+        result['catheter_bounds_px'] = [*extent.min(axis=0).tolist(), *(extent.max(axis=0)+1).tolist()]
         return result,overlay
     green=np.zeros((h,w),np.uint8)
     green[y0:y1,x0:x1]=cv2.inRange(hsv,np.array([32,55,30]),np.array([95,255,255]))
@@ -126,12 +243,12 @@ def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconst
         valid=window[(window>0)&selected]
         depths.append(float(np.median(valid)) if valid.size else None)
     result['depth_fraction']=sum(v is not None for v in depths)/len(depths)
-    background=depth_mm[(green>0)&(allowed>0)&(depth_mm>0)]
+    background=depth_mm[(green>0)&(depth_mm>0)]
     valid=[v for v in depths if v is not None]
     result['background_separation_mm']=float(np.median(background)-np.median(valid)) if background.size and valid else None
     result['sample_depth_mm']=depths
     if deproject is not None:
-        result['shape_3d']=reconstruction(depth_mm,orange,mask,green & allowed,curve,deproject,settings)
+        result['shape_3d']=reconstruction(depth_mm,orange,mask,green,curve,deproject,settings)
     return result,overlay
 
 
@@ -145,7 +262,7 @@ def analyze_rgb(color, settings):
         scale = 640 / max(height, width)
         size = (max(1, round(width*scale)), max(1, round(height*scale)))
         working = cv2.resize(color, size, interpolation=cv2.INTER_AREA)
-    measured, overlay = analyze(working, None, settings)
+    measured, overlay = analyze(working, None, settings, side_view=True)
     angle = measured['projected_signed_deg']
     result = dict(valid=angle is not None, angle_deg=angle, curve_px=measured['curve_px'],
                   reason='' if angle is not None else measured['reason'])
@@ -163,8 +280,12 @@ def analyze_rgb(color, settings):
     return result, overlay
 
 
-def locate_rgb_roi(color, settings):
-    measured, _ = analyze_rgb(color, dict(settings, roi=[0., 0., 1., 1.]))
+def locate_roi(color, settings, *, side_view=False):
+    full_frame = dict(settings, roi=[0., 0., 1., 1.])
+    if side_view:
+        measured, _ = analyze_rgb(color, full_frame)
+    else:
+        measured, _ = analyze(color, None, full_frame)
     bounds = measured.get('catheter_bounds_px')
     if not measured['valid'] or not bounds:
         raise ValueError('未找到导管，请确认完整橙色近端与白色柔性段可见并调整颜色阈值')
@@ -172,7 +293,15 @@ def locate_rgb_roi(color, settings):
     x0, y0, x1, y1 = bounds
     span = max(x1-x0, y1-y0)
     # Leave room for motion in both directions, including a nearly straight reference.
-    pad_x = max(.06, .4*span/width)
-    pad_y = max(.15, .85*span/height)
+    if not side_view and y1-y0 > x1-x0:
+        pad_x = max(.15, .85*span/width)
+        pad_y = max(.06, .4*span/height)
+    else:
+        pad_x = max(.06, .4*span/width)
+        pad_y = max(.15, .85*span/height)
     return [max(0., x0/width-pad_x), max(0., y0/height-pad_y),
             min(1., x1/width+pad_x), min(1., y1/height+pad_y)]
+
+
+def locate_rgb_roi(color, settings):
+    return locate_roi(color, settings, side_view=True)

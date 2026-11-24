@@ -20,7 +20,7 @@ async function act(action, data = {}, quiet = false) {
     const result = await response.json();
     if (!response.ok) throw Error(result.error);
     if (!quiet) await refresh();
-    return true;
+    return result.result ?? true;
   } catch (error) {
     if (!quiet) toast(error.message);
     return false;

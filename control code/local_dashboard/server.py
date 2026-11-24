@@ -285,24 +285,27 @@ class Engine:
         self.heartbeat = time.monotonic()
 
     @staticmethod
-    def is_side_autolocate(body):
-        return (body.get('action'), body.get('device'), body.get('operation')) == (
-            'device', 'camera.side_view', 'auto_locate')
+    def is_camera_autolocate(body):
+        return (body.get('action') == 'device' and body.get('operation') == 'auto_locate'
+                and body.get('device') in ('camera.d405', 'camera.side_view'))
 
-    def auto_locate_side(self, body):
+    def auto_locate_camera(self, body):
         client = str(body.get('client',''))
+        camera = self.plugins.devices[body['device']]
         with self.lock:
             if body.get('_script'):
-                raise ValueError('侧视自动定位请在页面完成')
+                raise ValueError('相机自动定位请在页面完成')
+            if not isinstance(body.get('arguments', {}), dict):
+                raise ValueError('设备参数必须是对象')
             self.claim_control(client)
             if self.experiment.process is not None:
                 raise ValueError('请先停止实验再自动定位')
-        candidate = self.side_view.roi_candidate()
+        candidate = camera.roi_candidate()
         with self.lock:
             if (self.owner != client or time.monotonic()-self.heartbeat_time() > 1.5
                     or self.experiment.process is not None):
                 raise ValueError('控制会话或实验状态已变化，请重新自动定位')
-            return self.side_view.apply_auto_roi(candidate)
+            return camera.apply_auto_roi(candidate)
 
     def action(self, body):
         if body.get('action')=='heartbeat':
@@ -312,8 +315,8 @@ class Engine:
                 self.heartbeat_seen=(client,time.monotonic())
                 self.heartbeat_count+=1
             return dict(ok=True,accepted=accepted,owner=self.owner)
-        if self.is_side_autolocate(body):
-            return self.auto_locate_side(body)
+        if self.is_camera_autolocate(body):
+            return self.auto_locate_camera(body)
         with self.lock:
             op = body.get('action'); client = str(body.get('client', ''))
             if op == 'stop_all': self.experiment.cancel(); self.stop('全部停止按钮 / Esc'); return
@@ -706,7 +709,7 @@ class Handler(BaseHTTPRequestHandler):
                             engine.action(dict(action='motor_renew',client=body['client']))
                 if body.get('wait') is True: time.sleep(.1)
                 self.send(200, result); return
-            if self.path == '/api/action' and engine.is_side_autolocate(body):
+            if self.path == '/api/action' and engine.is_camera_autolocate(body):
                 self.send(200, {'ok':True,'result':engine.action(body)})
                 return
             with engine.lock:
