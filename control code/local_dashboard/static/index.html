@@ -37,8 +37,11 @@
       </div>
       <div class="camera-quick">
         <button id="clocate" type="button" disabled>自动定位导管</button>
+        <button id="czoom" type="button" disabled>放大导管</button>
+        <button id="cresetroi" type="button" disabled>重置全景</button>
         <button class="primary" id="crecord" type="button" disabled>开始记录</button><button id="crecordstop" type="button" disabled>结束记录</button>
         <span id="crecordstate">未记录</span>
+        <span id="czoomhint" hidden>切换到「显示全景」后可重新拖框</span>
       </div>
       <p id="cerror" class="axiserror camera-error" role="status"></p>
       <div id="pretestsetup" class="pretestbar" hidden>
@@ -117,6 +120,9 @@
       </div>
       <div class="camera-quick">
         <button id="side-locate" class="primary" type="button">自动定位导管</button>
+        <button id="side-zoom" type="button" disabled>放大导管</button>
+        <button id="side-resetroi" type="button" disabled>重置全景</button>
+        <span id="side-zoomhint" hidden>切换到「显示全景」后可重新拖框</span>
         <span id="side-lock" hidden>实验或记录期间锁定识别设置</span>
       </div>
       <p id="side-error" class="axiserror camera-error" role="status"></p>

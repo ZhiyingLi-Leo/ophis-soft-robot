@@ -15,6 +15,7 @@ import threading
 import time
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs
 
 from experiments import Experiments
 from pretest_data import shape_angle
@@ -672,10 +673,12 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, RuntimeError) as error:
                 self.send(503, {'error': str(error)})
             return
-        if self.path in ('/api/camera/preview', '/api/camera/side-view/preview'):
+        path, _, query = self.path.partition('?')
+        if path in ('/api/camera/preview', '/api/camera/side-view/preview'):
             engine = self.server.engine
-            camera = engine.side_view if self.path.endswith('/side-view/preview') else engine.camera
-            preview=camera.preview(with_settings=True)
+            camera = engine.side_view if path.endswith('/side-view/preview') else engine.camera
+            zoom = parse_qs(query).get('zoom') == ['1']
+            preview=camera.preview(with_settings=True, zoom=zoom)
             if preview is None:self.send(404, {'error':'相机没有新鲜图像'})
             else:
                 jpeg, settings = preview

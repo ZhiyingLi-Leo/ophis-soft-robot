@@ -1,4 +1,4 @@
-import { installRoiDrag } from './camera.js';
+import { installRoiDrag, setupCameraPreview } from './camera.js';
 
 const $=id=>document.getElementById(id);
 
@@ -10,21 +10,27 @@ export function setupSideCamera(act){
   const colorFields=['side-white','side-sat','side-min-h','side-min-s','side-min-v','side-max-h','side-max-s','side-max-v'];
   const number=id=>$(id).valueAsNumber;
   let camera, fresh=false, locked=false, pending=false, listing=false;
-  let lastFrame=null, previewPending=false, imageUrl=null, previousSettings='';
+  let settingsRoi, previousSettings='';
   let error='';
+  const preview=setupCameraPreview({
+    image,card:$('side-card'),placeholder:$('side-placeholder'),endpoint:'/api/camera/side-view/preview',
+    toggle:$('side-zoom'),reset:$('side-resetroi'),hint:$('side-zoomhint'),
+    onReset:roi=>updateSettings('configure',{roi})
+  });
 
-  function syncSettings(force=false){
-    if(!camera)return;
-    const s=camera.settings, signature=JSON.stringify(s);
+  function syncSettings(force=false,s=camera?.settings){
+    if(!s)return;
+    const signature=JSON.stringify(s);
     if(!force&&signature===previousSettings)return;
     previousSettings=signature;
+    settingsRoi=s.roi;
     s.roi.forEach((value,i)=>$(roiFields[i]).value=+(value*100).toFixed(4));
     [s.white_min,s.white_sat,...s.orange_min,...s.orange_max].forEach((value,i)=>$(colorFields[i]).value=value);
   }
   function activeConnection(){
     return camera?.online||['连接中','等待侧视首帧'].includes(camera?.status);
   }
-  function controls(){
+  function controls(autoZoom=false){
     $('side-config').disabled=!camera||locked||pending;
     $('side-locate').disabled=!fresh||locked||pending;
     $('side-lock').hidden=!locked;
@@ -32,7 +38,7 @@ export function setupSideCamera(act){
     select.disabled=!camera||locked||listing||activeConnection();
     $('side-connect').disabled=!camera||locked||pending||(!activeConnection()&&!select.value);
     $('side-connect').textContent=activeConnection()?'断开侧视相机':'接入侧视相机';
-    image.classList.toggle('drawing-enabled',fresh&&!locked&&!pending);
+    preview.update(camera&&settingsRoi,fresh,!!camera&&!locked&&!pending,autoZoom===true);
     $('side-error').textContent=error||camera?.error||camera?.record_error||'';
   }
   async function command(operation,args={}){
@@ -40,6 +46,13 @@ export function setupSideCamera(act){
     try{
       return await device(operation,args);
     }finally{pending=false;controls();}
+  }
+  async function updateSettings(operation,args,autoZoom=false){
+    const result=await command(operation,args);
+    if(result?.settings){
+      syncSettings(true,result.settings);
+      controls(autoZoom);
+    }
   }
   $('side-discover').onclick=async()=>{
     listing=true;error='';controls();
@@ -65,38 +78,18 @@ export function setupSideCamera(act){
     const values=colorFields.map(number);
     const roi=roiFields.map(id=>number(id)/100);
     if(![...values,...roi].every(Number.isFinite)){error='请填写全部 ROI 和颜色参数。';controls();return;}
-    command('configure',{roi,white_min:values[0],white_sat:values[1],
+    updateSettings('configure',{roi,white_min:values[0],white_sat:values[1],
       orange_min:values.slice(2,5),orange_max:values.slice(5,8)});
   };
-  $('side-locate').onclick=async()=>{if(await command('auto_locate'))syncSettings(true);};
+  $('side-locate').onclick=()=>updateSettings('auto_locate',{},true);
 
   installRoiDrag(image,$('side-cropbox'),{
-    enabled:()=>fresh&&!locked&&!pending,
-    onSelection:async roi=>{
+    enabled:preview.canDrag,
+    onSelection:roi=>{
       if(!roi){error='区域宽高至少占画面的 5%。';controls();return;}
-      if(await command('configure',{roi}))syncSettings(true);
+      return updateSettings('configure',{roi},true);
     }
   });
-
-  function clearPreview(){
-    if(imageUrl)URL.revokeObjectURL(imageUrl);
-    imageUrl=null;lastFrame=null;
-    image.removeAttribute('src');image.hidden=true;$('side-placeholder').hidden=false;
-  }
-  async function preview(){
-    if(previewPending||camera.frame_number===lastFrame||$('side-card').hidden||document.body.dataset.page!=='camera')return;
-    const frame=camera.frame_number, deviceId=camera.device_id;
-    previewPending=true;
-    try{
-      const response=await fetch('/api/camera/side-view/preview',{signal:AbortSignal.timeout(2000)});
-      if(!response.ok)throw Error();
-      const blob=await response.blob();
-      if(!fresh||camera?.device_id!==deviceId)return;
-      if(imageUrl)URL.revokeObjectURL(imageUrl);
-      imageUrl=URL.createObjectURL(blob);image.src=imageUrl;
-      image.hidden=false;$('side-placeholder').hidden=true;lastFrame=frame;
-    }catch{clearPreview();}finally{previewPending=false;}
-  }
 
   return {render(state){
     camera=state?.modules?.[key]?.state;
@@ -115,6 +108,6 @@ export function setupSideCamera(act){
     $('side-age').textContent=Number.isFinite(camera?.frame_age)?`${camera.frame_age.toFixed(2)} s`:'—';
     const recording=camera?.recording?'记录中':camera?.finalizing?'收尾中':camera?.recorded_frames?'已记录':'未记录';
     $('side-record').textContent=recording+(camera?.recorded_frames?` · ${camera.recorded_frames} 帧`:'');
-    if(fresh)preview();else clearPreview();
+    preview.render(camera?.frame_number,camera?.device_id);
   }};
 }

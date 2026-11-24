@@ -161,13 +161,17 @@ def _end_tangent(stations, pixels, width):
     return weights @ np.asarray(centers)
 
 
+def roi_pixel_bounds(roi, shape):
+    height, width = shape[:2]
+    x0, y0, x1, y1 = [int(v*n) for v, n in zip(roi, (width, height, width, height))]
+    return x0, y0, max(x0+1, x1), max(y0+1, y1)
+
+
 def analyze(color, depth_mm, settings, *, deproject=None, reconstruction=reconstruct, side_view=False):
     import cv2
     import numpy as np
     h,w=color.shape[:2]
-    roi=settings['roi']
-    x0,y0,x1,y1=[int(v*n) for v,n in zip(roi,[w,h,w,h])]
-    x1,y1=max(x0+1,x1),max(y0+1,y1)
+    x0,y0,x1,y1=roi_pixel_bounds(settings['roi'], color.shape)
     hsv=cv2.cvtColor(color[y0:y1,x0:x1],cv2.COLOR_BGR2HSV)
     result=dict(valid=False, reason='未识别到橙色近端与白色柔性段', curve_px=[],
                 projected_theta_deg=None, projected_signed_deg=None, depth_fraction=0., surface_theta_deg=None,

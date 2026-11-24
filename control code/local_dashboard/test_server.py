@@ -504,6 +504,47 @@ class Tests(unittest.TestCase):
                 server.shutdown()
                 thread.join()
 
+    def test_http_camera_zoom_routes(self):
+        import cv2
+        import numpy as np
+        from test_uvc import catheter
+
+        color = catheter(22, (1920, 1080))
+        depth = np.zeros((240, 320), np.uint16)
+
+        def publish_d405():
+            frame = cv2.resize(color, (320, 240))
+            self.e.camera._publish(frame, depth, depth, .001, None,
+                                   dict(host_receive_monotonic=time.monotonic(), frame_number=1), None)
+
+        def publish_side():
+            self.e.side_view._publish(dict(host_receive_monotonic=time.monotonic(), frame_number=1, fps=30), color)
+
+        with ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
+            server.engine = self.e
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                for route, camera, publish, full_shape, zoom_shape in (
+                    ('preview', self.e.camera, publish_d405, (240, 320), (120, 160)),
+                    ('side-view/preview', self.e.side_view, publish_side, (360, 640), (540, 960)),
+                ):
+                    url = f'http://127.0.0.1:{server.server_port}/api/camera/{route}'
+                    for cropped, roi in ((False, [0, 0, 1, 1]), (True, [.125, .25, .625, .75])):
+                        with self.subTest(route=route, roi=roi):
+                            camera.command('configure', {'roi': roi})
+                            publish()
+                            for query in ('', '?zoom=0', '?zoom=1'):
+                                with urlopen(url+query) as response:
+                                    self.assertEqual(response.headers['Content-Type'], 'image/jpeg')
+                                    self.assertEqual(json.loads(response.headers['X-Camera-Settings'])['roi'], roi)
+                                    pixels = cv2.imdecode(np.frombuffer(response.read(), np.uint8), cv2.IMREAD_COLOR)
+                                    expected = zoom_shape if query == '?zoom=1' and cropped else full_shape
+                                    self.assertEqual(pixels.shape[:2], expected)
+            finally:
+                server.shutdown()
+                thread.join()
+
     def test_http_local_only(self):
         import urllib.request
         server=ThreadingHTTPServer(('127.0.0.1',0),Handler); server.engine=self.e

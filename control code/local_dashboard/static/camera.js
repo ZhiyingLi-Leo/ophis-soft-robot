@@ -1,6 +1,72 @@
 import { createCameraShape } from './camera-shape.js';
 
 const $=selector=>document.querySelector(selector);
+export const fullFrameRoi=[0,0,1,1];
+const sameRoi=(a,b)=>!!a&&!!b&&a.every((value,i)=>value===b[i]);
+
+export function setupCameraPreview({image, placeholder, card, endpoint, toggle, reset, hint, onReset, onLoad=()=>{}}){
+  let roi, fresh=false, configurable=false, zoom=false, fullFrameLoaded=false;
+  let pending=false, lastFrame=null, imageUrl=null, deviceId;
+  const canDrag=()=>fresh&&configurable&&!zoom&&fullFrameLoaded;
+  function controls(){
+    const hasRoi=!!roi&&!sameRoi(roi,fullFrameRoi);
+    toggle.disabled=!hasRoi;
+    toggle.textContent=zoom?'显示全景':'放大导管';
+    reset.disabled=!hasRoi||!configurable;
+    hint.hidden=!zoom;
+    image.classList.toggle('drawing-enabled',canDrag());
+  }
+  function clear(){
+    if(imageUrl)URL.revokeObjectURL(imageUrl);
+    imageUrl=null;lastFrame=null;fullFrameLoaded=false;
+    image.removeAttribute('src');image.hidden=true;placeholder.hidden=false;
+    onLoad(null);
+    controls();
+  }
+  toggle.onclick=()=>{
+    zoom=!zoom;
+    clear();
+  };
+  reset.onclick=()=>onReset(fullFrameRoi);
+  return {
+    canDrag,
+    update(nextRoi, isFresh, canConfigure, autoZoom=false){
+      const nextZoom=!!nextRoi&&!sameRoi(nextRoi,fullFrameRoi)&&(zoom||autoZoom);
+      const changed=zoom!==nextZoom||(nextZoom&&!sameRoi(roi,nextRoi));
+      zoom=nextZoom;roi=nextRoi;fresh=isFresh;configurable=canConfigure;
+      if(changed||(!fresh&&imageUrl))clear();
+      controls();
+    },
+    async render(frame, cameraId){
+      if(deviceId!==cameraId){
+        deviceId=cameraId;
+        clear();
+      }
+      if(!fresh||pending||frame===lastFrame||card.hidden||document.body.dataset.page!=='camera')return;
+      pending=true;
+      const requestedZoom=zoom;
+      try{
+        const response=await fetch(endpoint+'?zoom='+(requestedZoom?1:0),{signal:AbortSignal.timeout(2000)});
+        if(!response.ok)throw Error('暂无新鲜图像');
+        const shown=JSON.parse(response.headers.get('X-Camera-Settings'));
+        const blob=await response.blob();
+        if(!fresh||deviceId!==cameraId||zoom!==requestedZoom||(requestedZoom&&!sameRoi(roi,shown.roi)))return;
+        if(imageUrl)URL.revokeObjectURL(imageUrl);
+        const url=imageUrl=URL.createObjectURL(blob);
+        image.onload=()=>{
+          if(imageUrl!==url)return;
+          fullFrameLoaded=!requestedZoom;
+          onLoad(shown);
+          controls();
+        };
+        image.onerror=()=>{if(imageUrl===url)clear();};
+        image.src=url;
+        image.hidden=false;placeholder.hidden=true;lastFrame=frame;
+      }catch{clear();}finally{pending=false;}
+    }
+  };
+}
+
 export function installRoiDrag(image, box, {enabled, onSelection, onDrag=()=>{}}){
   let drag=null;
   const clamp=value=>Math.max(0,Math.min(1,value));
@@ -46,7 +112,7 @@ export function installRoiDrag(image, box, {enabled, onSelection, onDrag=()=>{}}
 }
 
 export function setupCamera(act, showProgress){
-  let state=null,busy=false,lastFrame=null,imageUrl=null;
+  let state=null,settingsRoi;
   let setup=false,applied=null,drawing=false,previewSettings=null,confirming=false,experimentRunning=false,axesReady=false;
   let listing=false,connecting=false,configuring=false,serialRequired=false,notice='',settingsSignature='';
   const image=$('#cpreview'), box=$('#cropbox'), select=$('#cdevices');
@@ -58,7 +124,13 @@ export function setupCamera(act, showProgress){
   const connected=()=>state?.online||['连接中','等待首帧'].includes(state?.status);
   const cameraFresh=()=>state?.online&&state.frame_age!==null&&state.frame_age<2;
   const canConfigure=()=>!!state&&!experimentRunning&&!state.recording&&!configuring&&!confirming;
-  function controls(){
+  const preview=setupCameraPreview({
+    image,card,placeholder:$('#cplaceholder'),endpoint:'/api/camera/preview',
+    toggle:$('#czoom'),reset:$('#cresetroi'),hint:$('#czoomhint'),
+    onReset:roi=>updateSettings('configure',{roi}),
+    onLoad:settings=>{previewSettings=settings;renderPretest();}
+  });
+  function controls(autoZoom=false){
     const active=connected();
     $('#cdiscover').disabled=!state||experimentRunning||listing;
     select.disabled=!state||experimentRunning||listing||connecting||active;
@@ -69,7 +141,7 @@ export function setupCamera(act, showProgress){
     $('#clocate').disabled=!canConfigure()||!cameraFresh()||state.frame_age>=1||connecting;
     $('#crecord').disabled=experimentRunning||!cameraFresh()||state.recording;
     $('#crecordstop').disabled=experimentRunning||!state?.recording;
-    image.classList.toggle('drawing-enabled',cameraFresh()&&canConfigure());
+    preview.update(state&&settingsRoi,cameraFresh(),canConfigure(),autoZoom===true);
     $('#cerror').textContent=state?.error||state?.record_error||notice;
   }
   $('#cdiscover').onclick=async()=>{
@@ -101,17 +173,19 @@ export function setupCamera(act, showProgress){
   };
   $('#crecord').onclick=()=>device('record_start',{label:$('#clabel').value.trim()});
   $('#crecordstop').onclick=()=>device('record_stop');
-  async function updateSettings(operation,args){
+  async function updateSettings(operation,args,autoZoom=false){
     configuring=true;applied=null;notice='';controls();renderPretest();
+    let changed=false;
     try{
       const result=await device(operation,args);
       if(result?.settings){
         applied=result.settings;
         syncSettings(true,applied);
+        changed=true;
       }
-    }finally{configuring=false;controls();renderPretest();}
+    }finally{configuring=false;controls(changed&&autoZoom);renderPretest();}
   }
-  function apply(){
+  function apply(autoZoom=false){
     if(!canConfigure())return;
     const settings={
       roi:roiIds.map(id=>$('#'+id).valueAsNumber/100),
@@ -121,10 +195,10 @@ export function setupCamera(act, showProgress){
     if(![...settings.roi,settings.white_min,settings.white_sat].every(Number.isFinite)){
       notice='请填写全部 ROI 和颜色参数。';controls();renderPretest();return;
     }
-    return updateSettings('configure',settings);
+    return updateSettings('configure',settings,autoZoom);
   }
-  $('#clocate').onclick=()=>{if(!$('#clocate').disabled)return updateSettings('auto_locate');};
-  $('#capply').onclick=apply;
+  $('#clocate').onclick=()=>{if(!$('#clocate').disabled)return updateSettings('auto_locate',{},true);};
+  $('#capply').onclick=()=>apply();
   for(const id of [...roiIds,'cwhite','csat'])$('#'+id).oninput=()=>{applied=null;renderPretest();};
   $('#pretestlimit').oninput=renderPretest;
   $('#pretestcancel').onclick=()=>{setup=false;renderPretest();showProgress();};
@@ -157,35 +231,14 @@ export function setupCamera(act, showProgress){
     $('#pretestconfirm').disabled=!!hint||confirming||experimentRunning||state.recording||!!drawing;
   }
   installRoiDrag(image, box, {
-    enabled:()=>cameraFresh()&&canConfigure(),
+    enabled:preview.canDrag,
     onDrag:active=>{drawing=active;renderPretest();},
     onSelection:bounds=>{
       if(!bounds){notice='区域宽高至少占画面的 5%，请重新拖框。';controls();return;}
       bounds.forEach((value,i)=>$('#'+roiIds[i]).value=(value*100).toFixed(2));
-      apply();
+      apply(true);
     }
   });
-  function clearPreview(){
-    if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=null;lastFrame=null;
-    previewSettings=null;
-    $('#cpreview').removeAttribute('src');$('#cpreview').hidden=true;$('#cplaceholder').hidden=false;
-  }
-  async function preview(c){
-    if(busy||card.hidden||document.body.dataset.page!=='camera'||lastFrame===c.frame_number)return;
-    busy=true;
-    try{
-      const response=await fetch('/api/camera/preview',{signal:AbortSignal.timeout(2000)});
-      if(!response.ok)throw Error('暂无新鲜图像');
-      const blob=await response.blob();
-      if(!cameraFresh())return;
-      if(imageUrl)URL.revokeObjectURL(imageUrl);
-      imageUrl=URL.createObjectURL(blob);
-      const shown=JSON.parse(response.headers.get('X-Camera-Settings'));
-      image.onload=()=>{previewSettings=shown;renderPretest();};
-      image.src=imageUrl;
-      $('#cpreview').hidden=false;$('#cplaceholder').hidden=true;lastFrame=c.frame_number;
-    }catch{clearPreview();}finally{busy=false;}
-  }
   const num=(v,d=1)=>Number.isFinite(v)?v.toFixed(d):'—';
   function renderShape(s, fresh){
     const page=document.body.dataset.page;
@@ -206,13 +259,14 @@ export function setupCamera(act, showProgress){
     const signature=JSON.stringify(settings);
     if(!force&&signature===settingsSignature)return;
     settingsSignature=signature;
+    settingsRoi=settings.roi;
     settings.roi.forEach((v,i)=>$('#'+roiIds[i]).value=+(v*100).toFixed(4));
     $('#cwhite').value=settings.white_min;$('#csat').value=settings.white_sat;
   }
   function render(s){
     const c=state=s?.camera;
     if(!c){
-      clearPreview();controls();$('#cstatus').textContent='服务离线';$('#cstatus').className='status';
+      controls();$('#cstatus').textContent='服务离线';$('#cstatus').className='status';
       renderPretest();renderShape(null,false);return;
     }
     const running=['running','stopping'].includes(s.experiment?.status);
@@ -229,7 +283,7 @@ export function setupCamera(act, showProgress){
     $('#cdepth').textContent=fresh?`${shape?.observed_indices?.length??0} / 21`:'—';
     $('#crecordstate').textContent=c.recording?'记录中 · '+c.recorded_frames+' 帧':c.recorded_frames?'已记录 · '+c.recorded_frames+' 帧':'未记录';
     $('#csession').textContent=c.session_path||'记录将在本机 data/ 下创建实验目录';
-    if(!fresh)clearPreview();else preview(c);
+    preview.render(c.frame_number,c.calibration?.serial);
     renderPretest();
     renderShape(s,fresh);
   }

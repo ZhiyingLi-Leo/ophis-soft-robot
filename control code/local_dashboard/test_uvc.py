@@ -120,6 +120,32 @@ class UvcTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'已变化'):
             self.device.apply_auto_roi(candidate)
 
+    def test_zoom_preserves_native_1080p_detail_and_overlays(self):
+        color = catheter(22, (1920, 1080))
+        # A one-pixel pattern is lost in the normal 640 px preview.
+        color[310:340, 256:384:2] = (0, 65, 0)
+        original = color.copy()
+        self.publish(color, time.monotonic())
+        self.assertEqual(self.device.preview(zoom=True), self.device.preview(zoom=False))
+        roi = [.125, .25, .625, .75]
+        self.device.command('configure', {'roi': roi})
+        self.publish(color, time.monotonic(), 2)
+        jpeg, settings = self.device.preview(zoom=True, with_settings=True)
+        self.assertEqual(settings['roi'], roi)
+        crop = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        full = cv2.imdecode(np.frombuffer(self.device.preview(zoom=False), np.uint8), cv2.IMREAD_COLOR)
+        self.assertEqual(full.shape, (360, 640, 3))
+        self.assertEqual(crop.shape, (540, 960, 3))
+        even = crop[45:65, 24:120:2, 1]
+        odd = crop[45:65, 25:120:2, 1]
+        self.assertGreater(odd.mean() - even.mean(), 40)
+        points = np.rint(np.asarray(self.device.snapshot()['measurement']['curve_px']) - [240, 270]).astype(int)
+        root, middle, tip = (crop[y, x].astype(int) for x, y in points[[0, 10, -1]])
+        self.assertGreater(root[0] - root[2], 80)
+        self.assertGreater(middle[2] - middle[0], 80)
+        self.assertGreater(tip[2] - tip[0], 80)
+        np.testing.assert_array_equal(color, original)
+
     def test_autolocate_invalid_frame_preserves_applied_roi(self):
         old = self.device.snapshot()['settings']
         self.publish(np.zeros((180,320,3),np.uint8),time.monotonic())
@@ -138,6 +164,7 @@ class UvcTests(unittest.TestCase):
                 color = catheter(22,(width,height))
                 device = uvc.SideViewDevice(lambda:{'valid':True, 'axes': [{'id':3,'position':1.1}]})
                 self.addCleanup(device.close)
+                device.command('configure', {'roi': [.125, .25, .625, .75]})
                 start = time.monotonic()
                 with patch('device_plugins.uvc.time.monotonic',return_value=start) as clock:
                     info = dict(host_receive_monotonic=start,frame_number=1,fps=fps)
@@ -150,6 +177,8 @@ class UvcTests(unittest.TestCase):
                             device.command(op,{'white_min':98})
                     clock.return_value=start+.25
                     device._publish(dict(info,host_receive_monotonic=start+.25,frame_number=2),color)
+                    zoom = cv2.imdecode(np.frombuffer(device.preview(zoom=True), np.uint8), cv2.IMREAD_COLOR)
+                    self.assertEqual(zoom.shape, (height//2, width//2, 3))
                     device.stop_recording('完成')
                     rec['thread'].join(4)
                 self.assertFalse(device.snapshot()['finalizing'])

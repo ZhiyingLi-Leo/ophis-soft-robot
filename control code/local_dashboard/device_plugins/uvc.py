@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 
-from .vision import analyze_rgb, locate_rgb_roi
+from .vision import analyze_rgb, locate_rgb_roi, roi_pixel_bounds
 
 HELPER = (Path(__file__).resolve().parents[1] / '.venv' / 'OPHIS Side View.app' /
           'Contents' / 'MacOS' / 'ophis-uvc-capture')
@@ -164,11 +164,29 @@ class SideViewDevice:
             status['settings'] = copy.deepcopy(self.settings)
             return status
 
-    def preview(self, *, with_settings=False):
+    def preview(self, *, with_settings=False, zoom=False):
         with self.lock:
             if not self._fresh(2) or self.jpeg is None:
                 return None
-            return (self.jpeg, copy.deepcopy(self.status['measurement_settings'])) if with_settings else self.jpeg
+            jpeg, color = self.jpeg, self.color
+            settings = copy.deepcopy(self.status['measurement_settings'])
+            curve = self.status['measurement']['curve_px']
+        if zoom and settings['roi'] != [0, 0, 1, 1]:
+            import cv2
+            import numpy as np
+            x0, y0, x1, y1 = roi_pixel_bounds(settings['roi'], color.shape)
+            crop = color[y0:y1, x0:x1].copy()
+            if curve:
+                # Analysis publishes native pixel coordinates. Translate them into the crop.
+                points = np.rint(np.asarray(curve) - [x0, y0]).astype(np.int32)
+                cv2.polylines(crop, [points], False, (70, 220, 255), 2, cv2.LINE_AA)
+                cv2.circle(crop, points[0], 4, (255, 100, 0), -1, cv2.LINE_AA)
+                cv2.circle(crop, points[-1], 4, (0, 0, 255), -1, cv2.LINE_AA)
+            ok, encoded = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            if not ok:
+                return None
+            jpeg = encoded.tobytes()
+        return (jpeg, settings) if with_settings else jpeg
 
     def command(self, operation, args, context=None):
         if operation == 'connect':

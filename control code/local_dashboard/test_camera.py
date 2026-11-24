@@ -485,6 +485,51 @@ class VisionTests(unittest.TestCase):
             self.assertFalse(camera.snapshot()['recording'])
             with self.assertRaises(ValueError):camera.command('annotate',dict(note={}))
 
+    def test_zoom_crops_annotated_preview_and_preserves_raw_npz(self):
+        import cv2
+        import numpy as np
+        from types import SimpleNamespace
+
+        color = self.image()
+        native = np.full((120, 160), 140, np.uint16)
+        aligned = np.full(color.shape[:2], 150, np.uint16)
+        rs = SimpleNamespace(rs2_deproject_pixel_to_point=lambda _, p, z: [(p[0]-160)*z/300, (p[1]-120)*z/300, z])
+
+        def publish(camera, number):
+            camera._publish(color, native, aligned, .001, None,
+                            dict(host_receive_monotonic=time.monotonic(), frame_number=number), rs)
+
+        def decode(jpeg):
+            return cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+
+        with tempfile.TemporaryDirectory() as root:
+            camera = D405Device(root, lambda: {'valid': True})
+            self.addCleanup(camera.close)
+            publish(camera, 1)
+            full = camera.preview(zoom=False)
+            self.assertEqual(camera.preview(zoom=True), full)
+            roi = [0, .25, .875, .75]
+            camera.command('configure', {'roi': roi})
+            self.assertEqual(camera.preview(zoom=True), full)  # The cached frame still uses full-frame settings.
+            publish(camera, 2)
+            path = Path(camera.record_start('zoom')['session_path'])
+            try:
+                publish(camera, 3)
+                jpeg, settings = camera.preview(zoom=True, with_settings=True)
+                self.assertEqual(settings['roi'], roi)
+                crop = decode(jpeg)
+                self.assertEqual(crop.shape, (120, 280, 3))
+                self.assertEqual(decode(camera.preview(zoom=False)).shape, color.shape)
+                x, y = (int(v) for v in camera.snapshot()['measurement']['curve_px'][-1])
+                blue, _, red = crop[y-60, x].astype(int)
+                self.assertGreater(red - blue, 80)
+            finally:
+                camera.stop_recording('test')
+            with np.load(path/'frame_000000.npz') as arrays:
+                np.testing.assert_array_equal(arrays['color_bgr'], color)
+                np.testing.assert_array_equal(arrays['native_depth'], native)
+                np.testing.assert_array_equal(arrays['aligned_depth'], aligned)
+
     def test_disk_error_is_visible_and_recording_stops(self):
         with tempfile.TemporaryDirectory() as root:
             camera=D405Device(root,lambda:{})

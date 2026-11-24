@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import macos_camera
-from .vision import analyze, locate_roi
+from .vision import analyze, locate_roi, roi_pixel_bounds
 from .shape3d import BendDirectionHistory
 
 
@@ -45,7 +45,7 @@ class D405Device:
         self.telemetry=telemetry
         self.halt=threading.Event();self.thread=None
         self.bridge_process = self.bridge_connection = None
-        self.color=self.jpeg=None;self.recording=None
+        self.color=self.jpeg=self.overlay=None;self.recording=None
         self.bend_history=BendDirectionHistory()
         self.settings=dict(roi=[0.,0.,1.,1.],white_min=85,white_sat=100,length_mm=30.,diameter_mm=6.)
         self.status=dict(online=False,name='RealSense D405',status='未接入',error='',last_frame_time=None,
@@ -75,10 +75,20 @@ class D405Device:
             s['dependencies']=dependencies()
             return s
 
-    def preview(self, *, with_settings=False):
+    def preview(self, *, with_settings=False, zoom=False):
         with self.lock:
-            if not self._fresh(2):return None
-            return (self.jpeg, self.status['measurement_settings']) if with_settings and self.jpeg else self.jpeg
+            if not self._fresh(2) or self.jpeg is None:
+                return None
+            jpeg, overlay = self.jpeg, self.overlay
+            settings = copy.deepcopy(self.status['measurement_settings'])
+        if zoom and settings['roi'] != [0, 0, 1, 1]:
+            import cv2
+            x0, y0, x1, y1 = roi_pixel_bounds(settings['roi'], overlay.shape)
+            ok, encoded = cv2.imencode('.jpg', overlay[y0:y1, x0:x1], [cv2.IMWRITE_JPEG_QUALITY, 90])
+            if not ok:
+                return None
+            jpeg = encoded.tobytes()
+        return (jpeg, settings) if with_settings else jpeg
 
     def _fresh(self, seconds=1):
         stamp = self.status['last_frame_time']
@@ -147,7 +157,7 @@ class D405Device:
             if self.thread and self.thread.is_alive():raise ValueError('相机正在连接或运行，请等待或先断开')
             if self.bridge_process is not None and self.bridge_process.poll() is None:
                 raise ValueError('上一次自动启动的 D405 桥接尚未退出')
-            self.halt=threading.Event();self.color=self.jpeg=None
+            self.halt=threading.Event();self.color=self.jpeg=self.overlay=None
             self.bend_history=BendDirectionHistory()
             self.status.update(status='连接中',error='',measurement=None,last_frame_time=None)
             self.thread=threading.Thread(target=self._capture,args=(serial,),daemon=True)
@@ -157,7 +167,7 @@ class D405Device:
         with self.lock:
             self.halt.set()
             self.status.update(online=False,status='正在断开',measurement=None)
-            self.color=self.jpeg=None
+            self.color=self.jpeg=self.overlay=None
             if self.bridge_connection is not None:
                 try:
                     self.bridge_connection.shutdown(socket.SHUT_RDWR)
@@ -340,7 +350,7 @@ class D405Device:
                 except Exception:pass
             self.stop_recording('相机采集结束')
             with self.lock:
-                self.status['online']=False;self.color=self.jpeg=None
+                self.status['online']=False;self.color=self.jpeg=self.overlay=None
                 if self.halt.is_set():self.status['status']='未接入'
 
     def _publish(self,color,native,aligned_array,scale,intr,info,rs):
@@ -366,6 +376,7 @@ class D405Device:
             if self.halt.is_set():return
             self.color=color.copy()
             self.jpeg=jpeg.tobytes()
+            self.overlay=overlay
             self.status.update(online=True,status='采集中',error='',last_frame_time=info['host_receive_monotonic'],
                                frame_number=info['frame_number'],measurement=measured,measurement_settings=settings)
             self.status['processed_frames']+=1
