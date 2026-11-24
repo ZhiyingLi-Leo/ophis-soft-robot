@@ -71,7 +71,7 @@
 #gpstatus { display: block; margin: 4px 0 6px; color: #647586; font-size: 11px; }
 .gamepadactions { display: flex; gap: 5px; }
 .gamepadactions button { flex: 1; padding: 4px 6px; font-size: 11px; }
-.sidebarbottom { padding-top: 10px; }
+.sidebarbottom { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
 .sidebarbottom p { margin: 3px 0; }
 @media (min-width: 901px) {
   .sidebar {
@@ -83,6 +83,12 @@
     align-self: start;
   }
 }
+
+.shell { max-width: none; width: 100%; }
+main { max-width: none; width: 100%; }
+#stage { height: clamp(320px, calc(100vh - 355px), 980px); }
+body[data-page="hydraulic"] #stage,
+body[data-page="prop"] #stage { height: clamp(260px, calc(100vh - 540px), 620px); }
 
 .overviewcards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
 .summarycard { display: grid; align-content: start; gap: 8px; min-width: 0; padding: 13px; text-align: left; }
@@ -97,7 +103,7 @@ body[data-page="camera"] h1, body[data-page="console"] h1 { margin: 0; }
 .segmented button { border: 0; background: transparent; padding: 6px 12px; white-space: nowrap; }
 .segmented [aria-pressed="true"] { background: var(--blue); color: #fff; }
 
-#camerasection { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+#camerasection { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
 @media (min-width: 901px) {
   #camerasection[data-view-mode="both"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -114,7 +120,7 @@ body[data-page="camera"] h1, body[data-page="console"] h1 { margin: 0; }
   position: relative;
   aspect-ratio: 16 / 9;
   width: 100%;
-  max-height: min(46vh, 460px);
+  max-height: clamp(280px, calc(100vh - 340px), 780px);
   background: #edf1f5;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -174,6 +180,9 @@ body[data-page="camera"] h1, body[data-page="console"] h1 { margin: 0; }
 #side-config details { margin-top: 5px; }
 #side-apply { margin-top: 8px; }
 
+#consolepage { display: flex; flex-direction: column; min-height: calc(100vh - 165px); margin-top: 0; }
+#consolepage .consolebody { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+#consoleoutput { flex: 1; height: auto; min-height: 260px; }
 .consolebody .pretestbar { margin: 0 0 14px; }
 .pretestbar > .commandrow { margin-top: 0; }
 .command-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
