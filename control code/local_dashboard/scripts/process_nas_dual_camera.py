@@ -50,7 +50,11 @@ from stereo_reconstruction import (
 
 DEFAULT_NAS_ROOT = Path('/Volumes/zhiying')
 DEFAULT_OUTPUT_NAME = 'OPHIS_双机全量分析_2026-11-25'
-DEFAULT_CALIBRATION_REL = Path('OPHIS_双目标定_2026-11-25') / 'stereo_calibration.json'
+DEFAULT_CALIBRATION_DIR = Path('OPHIS_双目标定_2026-11-25')
+DEFAULT_CALIBRATION_CANDIDATES = (
+    DEFAULT_CALIBRATION_DIR / 'stereo_calibration_refined.json',
+    DEFAULT_CALIBRATION_DIR / 'stereo_calibration.json',
+)
 
 DATASET_GROUPS = {
     'single_axis': 'OPHIS_双机单轴位移采集_1-10mm_2026-11-25',
@@ -1036,7 +1040,7 @@ def parse_args(argv=None):
     parser.add_argument('--output', type=Path, default=None,
                         help=f'结果保存目录（默认 <nas-root>/{DEFAULT_OUTPUT_NAME}）')
     parser.add_argument('--calibration', type=Path, default=None,
-                        help=f'双目标定 JSON 路径（默认 <nas-root>/{DEFAULT_CALIBRATION_REL}）')
+                        help='双目标定 JSON 路径（默认优先选用 <nas-root>/OPHIS_双目标定_2026-11-25/stereo_calibration_refined.json）')
     parser.add_argument('--no-stereo', action='store_true',
                         help='跳过双目立体三维重建，仅运行 D405 与侧视分析')
     parser.add_argument('--datasets', nargs='+', choices=list(DATASET_GROUPS.keys()), default=None,
@@ -1054,6 +1058,16 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def resolve_calibration_path(nas_root, explicit=None):
+    if explicit is not None:
+        return Path(explicit)
+    for rel in DEFAULT_CALIBRATION_CANDIDATES:
+        candidate = Path(nas_root) / rel
+        if candidate.is_file():
+            return candidate
+    return Path(nas_root) / DEFAULT_CALIBRATION_CANDIDATES[0]
+
+
 def main(argv=None):
     args = parse_args(argv)
     if args.workers < 1:
@@ -1061,7 +1075,7 @@ def main(argv=None):
 
     nas_root = args.nas_root
     output_root = args.output if args.output is not None else (nas_root / DEFAULT_OUTPUT_NAME)
-    calib_path = args.calibration if args.calibration is not None else (nas_root / DEFAULT_CALIBRATION_REL)
+    calib_path = resolve_calibration_path(nas_root, args.calibration)
 
     if args.aggregate_only:
         report = aggregate_outputs(output_root, calibration_path=calib_path if calib_path.is_file() else None)

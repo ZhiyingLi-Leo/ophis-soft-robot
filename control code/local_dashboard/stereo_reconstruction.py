@@ -100,12 +100,14 @@ class StereoRig:
         )
         side_K = np.asarray(side['camera_matrix'], dtype=np.float64)
         side_dist = np.asarray(side['dist_coeffs'], dtype=np.float64).reshape(-1)
-        R = np.asarray(data['R_d405_to_side'], dtype=np.float64).reshape(3, 3)
-        t = np.asarray(data['t_d405_to_side_mm'], dtype=np.float64).reshape(3, 1)
+        stereo = data.get('stereo') if isinstance(data.get('stereo'), dict) else data
+        R = np.asarray(stereo['R_d405_to_side'], dtype=np.float64).reshape(3, 3)
+        t = np.asarray(stereo['t_d405_to_side_mm'], dtype=np.float64).reshape(3, 1)
         P_d405 = d405_K @ np.hstack((np.eye(3, dtype=np.float64), np.zeros((3, 1), dtype=np.float64)))
         P_side = side_K @ np.hstack((R, t))
         E = _skew(t) @ R
         F = np.linalg.inv(side_K).T @ E @ np.linalg.inv(d405_K)
+        rms = stereo.get('rms_px', data.get('stereo_rms_px'))
         return cls(
             d405_K=d405_K,
             d405_coeffs=d405_coeffs,
@@ -117,8 +119,8 @@ class StereoRig:
             P_d405=P_d405,
             P_side=P_side,
             F_d405_to_side=F,
-            baseline_mm=float(data.get('baseline_mm', np.linalg.norm(t))),
-            stereo_rms_px=float(data['stereo_rms_px']) if data.get('stereo_rms_px') is not None else None,
+            baseline_mm=float(stereo.get('baseline_mm', data.get('baseline_mm', np.linalg.norm(t)))),
+            stereo_rms_px=float(rms) if rms is not None else None,
         )
 
     @classmethod

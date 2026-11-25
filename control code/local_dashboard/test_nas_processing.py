@@ -147,6 +147,31 @@ class StereoReconstructionTests(unittest.TestCase):
         recovered = deproject_d405_numpy(distorted, 210.0, intr)
         np.testing.assert_allclose(recovered, pt3d[0], atol=0.05)
 
+    def test_refined_calibration_nested_schema_loads_and_is_preferred(self):
+        refined = {
+            'method': 'square_pixel_radial_k1k2_pruned_20_poses',
+            'board': SAMPLE_CALIB['board'],
+            'd405': SAMPLE_CALIB['d405'],
+            'side_view': SAMPLE_CALIB['side_view'],
+            'stereo': {
+                'R_d405_to_side': SAMPLE_CALIB['R_d405_to_side'],
+                't_d405_to_side_mm': [41.826, -137.050, 209.136],
+                'baseline_mm': 251.50,
+                'rms_px': 2.14,
+            },
+        }
+        rig = StereoRig.from_dict(refined)
+        self.assertAlmostEqual(rig.baseline_mm, 251.50)
+        self.assertAlmostEqual(rig.stereo_rms_px, 2.14)
+        self.assertEqual(rig.t_d405_to_side_mm.shape, (3, 1))
+        with tempfile.TemporaryDirectory() as tmp:
+            cal_dir = Path(tmp) / 'OPHIS_双目标定_2026-11-25'
+            cal_dir.mkdir()
+            (cal_dir / 'stereo_calibration.json').write_text(json.dumps(SAMPLE_CALIB), encoding='utf-8')
+            self.assertEqual(nas.resolve_calibration_path(tmp).name, 'stereo_calibration.json')
+            (cal_dir / 'stereo_calibration_refined.json').write_text(json.dumps(refined), encoding='utf-8')
+            self.assertEqual(nas.resolve_calibration_path(tmp).name, 'stereo_calibration_refined.json')
+
     def test_stereo_reconstruction_recovers_3d_curve_and_bend_angle(self):
         rig = StereoRig.from_dict(SAMPLE_CALIB)
         for true_bend in (0.0, 25.0, 50.0):
