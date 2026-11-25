@@ -15,6 +15,6 @@
 !.env.example
 *.pem
 *.key
-control code/local_dashboard/data/
+control code/local_dashboard/data
 control code/system_control/cylinders.conf
 control code/system_control/hardware.conf
