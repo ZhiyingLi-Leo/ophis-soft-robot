@@ -17,7 +17,7 @@ import numpy as np
 from device_plugins import shape3d
 from stereo_calibration import _d405_pinhole_points
 
-DEFAULT_MAX_REPROJ_PX = 15.0
+DEFAULT_MAX_REPROJ_PX = 25.0
 DEFAULT_STATIONS = 21
 
 
@@ -333,14 +333,15 @@ def reconstruct_stereo_centerline(
     pts3d, err_d405, err_side, in_front = rig.triangulate(matched_d405, matched_side)
     reproj_pair = np.sqrt(0.5 * (err_d405 ** 2 + err_side ** 2))
     keep = in_front & (err_d405 <= max_reproj_px) & (err_side <= max_reproj_px)
-    if np.count_nonzero(keep) < 7 or not keep[0] or not keep[-1]:
+    kept_indices = np.flatnonzero(keep)
+    if len(kept_indices) < 7 or kept_indices[0] > 3 or kept_indices[-1] < len(matched_d405) - 4:
         return dict(
             invalid,
             reason='双目三角化重投影误差过大或端点不满足极线约束',
             reproj_rms_px=float(np.sqrt(np.mean(reproj_pair ** 2))) if len(reproj_pair) else None,
             d405_reproj_rms_px=float(np.sqrt(np.mean(err_d405 ** 2))) if len(err_d405) else None,
             side_reproj_rms_px=float(np.sqrt(np.mean(err_side ** 2))) if len(err_side) else None,
-            matched_stations=int(np.count_nonzero(keep)),
+            matched_stations=int(len(kept_indices)),
         )
 
     good_pts = pts3d[keep]
