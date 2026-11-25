@@ -1,20 +1,19 @@
-"""Batch-process the 2026-11-25 OPHIS dual-camera dataset stored on the NAS.
+"""Batch-process the 2026-11-25 OPHIS dual-camera dataset directly from NAS .tar archives.
 
-Supports raw .tar archives (including macOS AppleDouble ._ files) and unpacked
-batch directories across single-axis (1–10 mm), dual-axis training (2–6 mm),
-and dual-axis validation (3–5 mm) captures.
+Reads metadata, frames.jsonl, and only the required frames (steady-state
+reference + hold windows by default, or all frames with --mode all) directly
+from /Volumes/zhiying/.../*.tar into memory using byte offsets, computes
+reconstruction results, releases frame buffers immediately, and writes only the
+compact CSV / JSON / JSONL outputs back to the NAS — using zero local disk
+extraction space.
 
 For each round, produces:
   1. D405 3D centerline reconstruction (depth + smooth_depth + shape3d)
   2. Ace Pro side-view 2D centerline & signed bend angle
-  3. Dual-camera stereo 3D centerline triangulation via stereo_calibration.json
-  4. Per-batch rounds.csv, points.csv, steady_shapes.json, hysteresis.csv
+  3. Dual-camera stereo 3D centerline triangulation via stereo_calibration_refined.json
+  4. Per-batch rounds.csv, points.csv, steady_shapes.json (and hysteresis.csv in --mode all)
   5. Global all_rounds.csv, all_points.csv, single_axis_resolution.csv,
-     all_hysteresis.csv, and summary_report.json on the NAS.
-
-Extracts at most one .tar archive at a time into local scratch storage so SMB
-random I/O and local disk usage stay bounded, and checkpoints each completed
-batch so interrupted runs resume cleanly.
+     and summary_report.json on the NAS.
 """
 
 import argparse
@@ -23,13 +22,13 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 import csv
 from datetime import datetime
+import io
 import json
 import math
 from pathlib import Path
 import shutil
 import sys
 import tarfile
-import tempfile
 
 import cv2
 import numpy as np
@@ -37,7 +36,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from device_plugins import shape3d, vision
-from pretest_data import read_capture, read_side_capture, side_angle
+from pretest_data import side_angle
 from single_axis_response import profiles, summarize_side_round
 from stereo_calibration import DEFAULT_MAX_DT_MS, Frame, pair_frames
 from stereo_reconstruction import (
@@ -62,7 +61,8 @@ DATASET_GROUPS = {
     'dual_axis_val': 'OPHIS_双机双轴验证_3-5mm_2026-11-25',
 }
 
-PIPELINE_VERSION = '1.0.0'
+STEADY_PHASES = frozenset({'reference', 'hold'})
+PIPELINE_VERSION = '2.0.0'
 
 
 def read_json(path):
@@ -94,6 +94,94 @@ def write_csv(path, rows, fieldnames=None):
     tmp.replace(path)
 
 
+def _norm_tar_name(name):
+    parts = [p for p in Path(name).parts if p not in ('.', '')]
+    return '/'.join(parts)
+
+
+def index_tar_archive(tar_path):
+    """Index an uncompressed .tar into {rel_path: (offset_data, size)}, skipping macOS ._* files."""
+    index = {}
+    try:
+        with tarfile.open(tar_path, 'r:') as archive:
+            for member in archive:
+                if not member.isfile():
+                    continue
+                rel = Path(member.name)
+                if any(part.startswith('._') or part == '.DS_Store' for part in rel.parts):
+                    continue
+                if '..' in rel.parts or rel.is_absolute():
+                    raise ValueError(f'归档包含越界路径：{member.name}')
+                norm = _norm_tar_name(member.name)
+                if norm:
+                    index[norm] = (member.offset_data, member.size)
+    except (tarfile.TarError, EOFError, OSError) as error:
+        raise RuntimeError(f'无法读取归档索引 {tar_path}（可能尚未传输完成）：{error}') from error
+
+    # Detect whether points.json sits at root or under a single top-level directory.
+    if 'points.json' in index:
+        prefix = ''
+    else:
+        candidates = [k[:-len('/points.json')] for k in index if k.endswith('/points.json') and k.count('/') == 1]
+        if len(candidates) != 1:
+            raise ValueError(f'未在 {tar_path} 中找到唯一的 points.json（找到 {len(candidates)} 个）')
+        prefix = candidates[0] + '/'
+
+    if prefix:
+        index = {k[len(prefix):]: v for k, v in index.items() if k.startswith(prefix)}
+    return index
+
+
+class BatchReader:
+    """Zero-disk reader over either a NAS .tar archive (via byte-range seek) or an unpacked folder."""
+
+    def __init__(self, source_path, source_kind, tar_index=None):
+        self.source_path = Path(source_path)
+        self.source_kind = source_kind
+        self.tar_index = tar_index or {}
+        self._fh = None
+
+    def __enter__(self):
+        if self.source_kind == 'tar':
+            self._fh = self.source_path.open('rb')
+        return self
+
+    def __exit__(self, *_):
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+
+    def exists(self, rel_path):
+        norm = _norm_tar_name(rel_path)
+        if self.source_kind == 'tar':
+            return norm in self.tar_index
+        return (self.source_path / norm).is_file()
+
+    def read_bytes(self, rel_path):
+        norm = _norm_tar_name(rel_path)
+        if self.source_kind == 'tar':
+            entry = self.tar_index.get(norm)
+            if entry is None:
+                raise FileNotFoundError(f'{self.source_path} 中缺少 {norm}')
+            offset, size = entry
+            self._fh.seek(offset)
+            data = self._fh.read(size)
+            if len(data) != size:
+                raise IOError(f'{self.source_path} 中读取 {norm} 不完整（{len(data)}/{size}）')
+            return data
+        target = (self.source_path / norm).resolve()
+        if target != self.source_path.resolve() and self.source_path.resolve() not in target.parents:
+            raise ValueError(f'路径越界：{rel_path}')
+        return target.read_bytes()
+
+    def read_json(self, rel_path):
+        return json.loads(self.read_bytes(rel_path).decode('utf-8'))
+
+    def read_jsonl(self, rel_path):
+        text = self.read_bytes(rel_path).decode('utf-8')
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
 def smooth_depth(curve, z, fx, fy):
     """Fit the distal depth trend on projected arc, retaining gaps and tip station."""
     s = arc_lengths(curve / np.array([fx, fy], dtype=np.float64))
@@ -123,11 +211,7 @@ def smooth_depth(curve, z, fx, fy):
 
 
 def build_d405_camera(calibration):
-    """Build D405 pixel deprojector and smoothed 3D reconstructor.
-
-    Uses pyrealsense2 when available, and falls back to exact pure-NumPy
-    inverse Brown-Conrady deprojection otherwise (portable to Linux NAS/servers).
-    """
+    """Build D405 pixel deprojector and smoothed 3D reconstructor."""
     color = calibration['color']
     fx, fy = float(color['fx']), float(color['fy'])
 
@@ -193,45 +277,6 @@ def detect_quality_flag(batch_name):
     return 'ok'
 
 
-def safe_extract_tar(tar_path, destination):
-    """Extract a .tar archive to destination, skipping macOS ._ AppleDouble files."""
-    dest_resolved = Path(destination).resolve()
-    extracted = 0
-    try:
-        with tarfile.open(tar_path, 'r:*') as archive:
-            for member in archive:
-                rel = Path(member.name)
-                if any(part.startswith('._') or part == '.DS_Store' for part in rel.parts):
-                    continue
-                target = (dest_resolved / rel).resolve()
-                if target != dest_resolved and dest_resolved not in target.parents:
-                    raise ValueError(f'归档包含越界路径：{member.name}')
-                if member.isdir():
-                    target.mkdir(parents=True, exist_ok=True)
-                elif member.isfile():
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    src = archive.extractfile(member)
-                    if src is None:
-                        continue
-                    with src, target.open('wb') as dst:
-                        shutil.copyfileobj(src, dst, length=1024 * 1024)
-                    extracted += 1
-    except (tarfile.TarError, EOFError, OSError) as error:
-        raise RuntimeError(f'无法完整解压归档 {tar_path}（可能尚未传输完成）：{error}') from error
-    return extracted
-
-
-def find_batch_root(extracted_dir):
-    """Locate the directory containing points.json inside an extracted tar or folder."""
-    root = Path(extracted_dir)
-    if (root / 'points.json').is_file():
-        return root
-    candidates = [p.parent for p in sorted(root.glob('*/points.json')) if not p.parent.name.startswith('.')]
-    if len(candidates) == 1:
-        return candidates[0]
-    raise ValueError(f'未在 {root} 中找到唯一的 points.json（找到 {len(candidates)} 个）')
-
-
 def discover_batches(nas_root, selected_groups=None):
     """Discover all dual-camera batch sources (.tar or unpacked folders) on the NAS."""
     nas_root = Path(nas_root)
@@ -280,11 +325,6 @@ def discover_batches(nas_root, selected_groups=None):
 def _median_or_none(values):
     clean = [float(v) for v in values if v is not None and math.isfinite(v)]
     return float(np.median(clean)) if clean else None
-
-
-def _mean_or_none(values):
-    clean = [float(v) for v in values if v is not None and math.isfinite(v)]
-    return float(np.mean(clean)) if clean else None
 
 
 def _sd_or_none(values):
@@ -350,10 +390,17 @@ def _compute_hysteresis_rows(rows, ids, target_mm, repeat, dataset_group, batch_
     return results
 
 
+def _phase_of(times, stamp):
+    return ('before', 'reference', 'advance', 'hold', 'return', 'after')[bisect_right(times, stamp)]
+
+
 def analyze_dual_round(job):
-    """Process one dual-camera round (D405 3D + Ace Pro 2D + Stereo 3D)."""
+    """Process one dual-camera round directly from NAS .tar or directory into memory."""
     (
-        round_dir_str,
+        source_path,
+        source_kind,
+        round_tar_index,
+        round_rel_dir,
         out_dir_str,
         dataset_group,
         batch_name,
@@ -361,144 +408,164 @@ def analyze_dual_round(job):
         calib_dict,
         max_dt_ms,
         max_reproj_px,
+        mode,
+        write_frame_jsonl,
     ) = job
 
     cv2.setNumThreads(1)
-    path = Path(round_dir_str)
     out_dir = Path(out_dir_str)
+    steady_only = (mode == 'steady')
 
-    info = read_json(path / 'round.json')
-    meta = read_json(path / 'metadata.json')
-    frames, events = read_capture(path)
-    keys = ['reference_hold', 'T0', 'target_hold', 'return', 'T2']
-    times = [events[k] for k in keys]
-    if any(a >= b for a, b in zip(times, times[1:])) or len(frames) != info['frame_count'] or info['status'] != 'complete':
-        raise ValueError(f'D405 采集记录不完整：{path}')
+    def rpath(sub):
+        return f'{round_rel_dir}/{sub}'
 
-    ids = list(info['ids'])
-    target_mm = list(info['target_mm'])
-    reference_mm = list(info.get('reference_mm', [0, 0, 0]))
-    repeat = int(info['repeat'])
-    slug = round_slug(ids, target_mm, repeat)
-    cycle_end = times[-1] - times[1]
+    with BatchReader(source_path, source_kind, round_tar_index) as reader:
+        info = reader.read_json(rpath('round.json'))
+        meta = reader.read_json(rpath('metadata.json'))
+        d405_items = reader.read_jsonl(rpath('frames.jsonl'))
+        frames = [item for item in d405_items if item['kind'] == 'frame']
+        events = {item['note']['kind']: item['host_monotonic'] for item in d405_items if item['kind'] == 'annotation'}
 
-    # ---- 1. D405 stream ----
-    deproject_pixel, reconstruct = build_d405_camera(meta['calibration'])
-    depth_scale_mm = float(meta['calibration']['depth_scale_m']) * 1000.0
-    d405_rows = []
-    d405_frame_objs = []
-    for frame in frames:
-        stamp = float(frame['host_receive_monotonic'])
-        phase = ('before', 'reference', 'advance', 'hold', 'return', 'after')[bisect_right(times, stamp)]
-        with np.load(path / frame['file'], allow_pickle=False) as raw:
-            result, _ = vision.analyze(
-                raw['color_bgr'],
-                raw['aligned_depth'] * depth_scale_mm,
-                meta['settings'],
-                deproject=deproject_pixel,
-                reconstruction=reconstruct,
-            )
-        shape = result['shape_3d']
-        axes = sorted(frame['telemetry']['axes'], key=lambda a: a['id'])
-        d405_rows.append(dict(
-            file=frame['file'],
-            frame_number=frame.get('frame_number'),
-            host_receive_monotonic=stamp,
-            t_from_T0_s=stamp - times[1],
-            phase=phase,
-            actual_mm=[a['position'] for a in axes],
-            telemetry_valid=bool(frame['telemetry']['valid']),
-            curve_valid=bool(result['valid']),
-            curve_px=result.get('curve_px', []),
-            projected_theta_deg=result.get('projected_theta_deg'),
-            depth_fraction=result.get('depth_fraction'),
-            valid=bool(shape['valid']),
-            reason=shape['reason'],
-            angle_deg=shape.get('angle_deg'),
-            centerline_camera_mm=shape.get('centerline_camera_mm', []),
-            tip_tangent=shape.get('tip_tangent'),
-            shaft_direction=(shape.get('shaft_axis') or {}).get('direction'),
-            observed_indices=shape.get('observed_indices', []),
-        ))
-        d405_frame_objs.append(Frame(frame['file'], stamp, frame.get('frame_number')))
+        keys = ['reference_hold', 'T0', 'target_hold', 'return', 'T2']
+        times = [events[k] for k in keys]
+        if any(a >= b for a, b in zip(times, times[1:])) or len(frames) != info['frame_count'] or info['status'] != 'complete':
+            raise ValueError(f'D405 采集记录不完整：{source_path}:{round_rel_dir}')
 
-    d405_ref = [r for r in d405_rows if r['phase'] == 'reference' and r['valid']]
-    d405_hold = [r for r in d405_rows if r['phase'] == 'hold' and r['valid']]
-    d405_baseline = _median_or_none([r['angle_deg'] for r in d405_ref])
-    for r in d405_rows:
-        r['delta_deg'] = (r['angle_deg'] - d405_baseline) if (r['valid'] and d405_baseline is not None) else None
+        ids = list(info['ids'])
+        target_mm = list(info['target_mm'])
+        reference_mm = list(info.get('reference_mm', [0, 0, 0]))
+        repeat = int(info['repeat'])
+        slug = round_slug(ids, target_mm, repeat)
+        cycle_end = times[-1] - times[1]
 
-    d405_out = out_dir / 'd405_frames' / f'{slug}.jsonl'
-    with d405_out.open('w', encoding='utf-8') as stream:
-        for r in d405_rows:
-            stream.write(json.dumps(r, ensure_ascii=False, allow_nan=False, separators=(',', ':')) + '\n')
-
-    # ---- 2. Side-view (Ace Pro) stream ----
-    has_side = bool(info.get('side_view')) and (path / 'side_view' / 'frames.jsonl').is_file()
-    side_rows = []
-    side_frame_objs = []
-    side_summary = None
-    if has_side:
-        side_dir = path / 'side_view'
-        side_meta = read_json(side_dir / 'metadata.json')
-        side_frames = read_side_capture(path)
-        if len(side_frames) != info['side_view']['frame_count']:
-            raise ValueError(f'侧视采集记录帧数不一致：{path}')
-        size = side_meta['format']
-        prev_stamp = float('-inf')
-        for frame in side_frames:
+        # ---- 1. D405 stream (in-memory decode, steady-state filter when mode=='steady') ----
+        deproject_pixel, reconstruct = build_d405_camera(meta['calibration'])
+        depth_scale_mm = float(meta['calibration']['depth_scale_m']) * 1000.0
+        d405_rows = []
+        d405_frame_objs = []
+        for frame in frames:
             stamp = float(frame['host_receive_monotonic'])
-            if not math.isfinite(stamp) or stamp <= prev_stamp:
-                raise ValueError(f'侧视帧时间无效：{path}')
-            prev_stamp = stamp
-            phase = ('before', 'reference', 'advance', 'hold', 'return', 'after')[bisect_right(times, stamp)]
-            image_path = (side_dir / frame['file']).resolve()
-            if image_path.parent != side_dir.resolve():
-                raise ValueError(f'侧视帧路径无效：{image_path}')
-            raw_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-            if raw_bgr is None or raw_bgr.shape[:2] != (size['height'], size['width']):
-                raise ValueError(f'无法读取侧视原始帧：{image_path}')
-            res, _ = vision.analyze_rgb(raw_bgr, side_meta['settings'])
-            reading = side_angle(res)
-            telemetry = frame.get('telemetry') or {}
-            feedback = {item['id']: item for item in telemetry.get('axes', [])}
-            actual, offsets = [], []
-            for axis_id in (1, 2, 3):
-                sample = feedback.get(axis_id, {})
-                offset = sample['last_seen'] - stamp if sample.get('last_seen', 0) > 0 else None
-                offsets.append(offset)
-                actual.append(
-                    sample['position']
-                    if telemetry.get('valid') and offset is not None and abs(offset) <= 1.0
-                    and sample.get('online', True) and not sample.get('error')
-                    else None
+            phase = _phase_of(times, stamp)
+            if steady_only and phase not in STEADY_PHASES:
+                continue
+            npz_bytes = reader.read_bytes(rpath(frame['file']))
+            with np.load(io.BytesIO(npz_bytes), allow_pickle=False) as raw:
+                result, _ = vision.analyze(
+                    raw['color_bgr'],
+                    raw['aligned_depth'] * depth_scale_mm,
+                    meta['settings'],
+                    deproject=deproject_pixel,
+                    reconstruction=reconstruct,
                 )
-            side_rows.append(dict(
+            del npz_bytes
+            shape = result['shape_3d']
+            axes = sorted(frame['telemetry']['axes'], key=lambda a: a['id'])
+            d405_rows.append(dict(
                 file=frame['file'],
                 frame_number=frame.get('frame_number'),
                 host_receive_monotonic=stamp,
                 t_from_T0_s=stamp - times[1],
                 phase=phase,
-                actual_mm=actual,
-                feedback_offset_s=offsets,
-                telemetry_valid=all(v is not None for v in actual),
-                reference_position=all(
-                    v is not None and abs(v - q) <= 0.05 for v, q in zip(actual, reference_mm)
-                ),
-                valid=reading is not None,
-                reason=res['reason'],
-                angle_deg=reading,
-                curve_px=res['curve_px'],
+                actual_mm=[a['position'] for a in axes],
+                telemetry_valid=bool(frame['telemetry']['valid']),
+                curve_valid=bool(result['valid']),
+                curve_px=result.get('curve_px', []),
+                projected_theta_deg=result.get('projected_theta_deg'),
+                depth_fraction=result.get('depth_fraction'),
+                valid=bool(shape['valid']),
+                reason=shape['reason'],
+                angle_deg=shape.get('angle_deg'),
+                centerline_camera_mm=shape.get('centerline_camera_mm', []),
+                tip_tangent=shape.get('tip_tangent'),
+                shaft_direction=(shape.get('shaft_axis') or {}).get('direction'),
+                observed_indices=shape.get('observed_indices', []),
             ))
-            side_frame_objs.append(Frame(frame['file'], stamp, frame.get('frame_number')))
+            d405_frame_objs.append(Frame(frame['file'], stamp, frame.get('frame_number')))
 
-        side_summary = summarize_side_round(side_rows, cycle_end=cycle_end)
-        side_out = out_dir / 'side_frames' / f'{slug}.jsonl'
-        with side_out.open('w', encoding='utf-8') as stream:
-            for r in side_rows:
-                stream.write(json.dumps(r, ensure_ascii=False, allow_nan=False, separators=(',', ':')) + '\n')
+        d405_ref = [r for r in d405_rows if r['phase'] == 'reference' and r['valid']]
+        d405_hold = [r for r in d405_rows if r['phase'] == 'hold' and r['valid']]
+        d405_baseline = _median_or_none([r['angle_deg'] for r in d405_ref])
+        for r in d405_rows:
+            r['delta_deg'] = (r['angle_deg'] - d405_baseline) if (r['valid'] and d405_baseline is not None) else None
 
-    # ---- 3. Dual-camera stereo 3D reconstruction ----
+        if write_frame_jsonl:
+            d405_out = out_dir / 'd405_frames' / f'{slug}.jsonl'
+            with d405_out.open('w', encoding='utf-8') as stream:
+                for r in d405_rows:
+                    stream.write(json.dumps(r, ensure_ascii=False, allow_nan=False, separators=(',', ':')) + '\n')
+
+        # ---- 2. Side-view (Ace Pro) stream (in-memory PNG decode) ----
+        has_side = bool(info.get('side_view')) and reader.exists(rpath('side_view/frames.jsonl'))
+        side_rows = []
+        side_frame_objs = []
+        side_summary = None
+        if has_side:
+            side_meta = reader.read_json(rpath('side_view/metadata.json'))
+            side_items = reader.read_jsonl(rpath('side_view/frames.jsonl'))
+            side_frames = [item for item in side_items if item['kind'] == 'frame']
+            if not side_items or side_items[-1]['kind'] != 'end' or side_items[-1]['frames'] != len(side_frames):
+                raise ValueError(f'侧视记录不完整：{source_path}:{round_rel_dir}')
+            if len(side_frames) != info['side_view']['frame_count']:
+                raise ValueError(f'侧视采集记录帧数不一致：{source_path}:{round_rel_dir}')
+
+            size = side_meta['format']
+            prev_stamp = float('-inf')
+            for frame in side_frames:
+                stamp = float(frame['host_receive_monotonic'])
+                if not math.isfinite(stamp) or stamp <= prev_stamp:
+                    raise ValueError(f'侧视帧时间无效：{source_path}:{round_rel_dir}')
+                prev_stamp = stamp
+                phase = _phase_of(times, stamp)
+                if steady_only and phase not in STEADY_PHASES:
+                    continue
+                png_bytes = reader.read_bytes(rpath(f"side_view/{frame['file']}"))
+                raw_bgr = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+                del png_bytes
+                if raw_bgr is None or raw_bgr.shape[:2] != (size['height'], size['width']):
+                    raise ValueError(f"无法解码侧视原始帧：{source_path}:{round_rel_dir}/side_view/{frame['file']}")
+                res, _ = vision.analyze_rgb(raw_bgr, side_meta['settings'])
+                del raw_bgr
+                reading = side_angle(res)
+                telemetry = frame.get('telemetry') or {}
+                feedback = {item['id']: item for item in telemetry.get('axes', [])}
+                actual, offsets = [], []
+                for axis_id in (1, 2, 3):
+                    sample = feedback.get(axis_id, {})
+                    offset = sample['last_seen'] - stamp if sample.get('last_seen', 0) > 0 else None
+                    offsets.append(offset)
+                    actual.append(
+                        sample['position']
+                        if telemetry.get('valid') and offset is not None and abs(offset) <= 1.0
+                        and sample.get('online', True) and not sample.get('error')
+                        else None
+                    )
+                side_rows.append(dict(
+                    file=frame['file'],
+                    frame_number=frame.get('frame_number'),
+                    host_receive_monotonic=stamp,
+                    t_from_T0_s=stamp - times[1],
+                    phase=phase,
+                    actual_mm=actual,
+                    feedback_offset_s=offsets,
+                    telemetry_valid=all(v is not None for v in actual),
+                    reference_position=all(
+                        v is not None and abs(v - q) <= 0.05 for v, q in zip(actual, reference_mm)
+                    ),
+                    valid=reading is not None,
+                    reason=res['reason'],
+                    angle_deg=reading,
+                    curve_px=res['curve_px'],
+                ))
+                side_frame_objs.append(Frame(frame['file'], stamp, frame.get('frame_number')))
+
+            side_summary = summarize_side_round(side_rows, cycle_end=cycle_end)
+            if write_frame_jsonl:
+                side_out = out_dir / 'side_frames' / f'{slug}.jsonl'
+                with side_out.open('w', encoding='utf-8') as stream:
+                    for r in side_rows:
+                        stream.write(json.dumps(r, ensure_ascii=False, allow_nan=False, separators=(',', ':')) + '\n')
+
+    # ---- 3. Dual-camera stereo 3D reconstruction (pure in-memory) ----
     stereo_rows = []
     if has_side and calib_dict is not None:
         rig = StereoRig.from_dict(calib_dict)
@@ -546,10 +613,11 @@ def analyze_dual_round(job):
         for r in stereo_rows:
             r['delta_deg'] = (r['angle_deg'] - stereo_baseline) if (r['valid'] and stereo_baseline is not None) else None
 
-        stereo_out = out_dir / 'stereo_frames' / f'{slug}.jsonl'
-        with stereo_out.open('w', encoding='utf-8') as stream:
-            for r in stereo_rows:
-                stream.write(json.dumps(r, ensure_ascii=False, allow_nan=False, separators=(',', ':')) + '\n')
+        if write_frame_jsonl:
+            stereo_out = out_dir / 'stereo_frames' / f'{slug}.jsonl'
+            with stereo_out.open('w', encoding='utf-8') as stream:
+                for r in stereo_rows:
+                    stream.write(json.dumps(r, ensure_ascii=False, allow_nan=False, separators=(',', ':')) + '\n')
     else:
         stereo_ref = []
         stereo_baseline = None
@@ -580,17 +648,29 @@ def analyze_dual_round(job):
         for axis_idx in range(3)
     ]
 
+    d405_ref_p95 = (
+        float(np.percentile([abs(r['angle_deg'] - d405_baseline) for r in d405_ref], 95))
+        if d405_ref and d405_baseline is not None
+        else None
+    )
+    stereo_ref_p95 = (
+        float(np.percentile([abs(r['angle_deg'] - stereo_baseline) for r in stereo_ref], 95))
+        if stereo_ref and stereo_baseline is not None
+        else None
+    )
+
     round_row = dict(
         dataset_group=dataset_group,
         batch_name=batch_name,
         quality_flag=quality_flag,
+        mode=mode,
         ids=','.join(str(i) for i in ids),
         target_q1_mm=target_mm[0],
         target_q2_mm=target_mm[1],
         target_q3_mm=target_mm[2],
         repeat=repeat,
         round_slug=slug,
-        round_dir=path.name,
+        round_dir=round_rel_dir,
         actual_hold_q1_mm=actual_hold[0],
         actual_hold_q2_mm=actual_hold[1],
         actual_hold_q3_mm=actual_hold[2],
@@ -604,6 +684,7 @@ def analyze_dual_round(job):
         d405_hold_delta_deg=_median_or_none([r['delta_deg'] for r in d405_hold]),
         d405_ref_sd_deg=_sd_or_none([r['angle_deg'] for r in d405_ref]),
         d405_hold_sd_deg=_sd_or_none([r['angle_deg'] for r in d405_hold]),
+        d405_ref_noise_p95_deg=d405_ref_p95,
         d405_tip_turn_deg=d405_turn,
         d405_tip_dx_mm=d405_tip_delta[0],
         d405_tip_dy_mm=d405_tip_delta[1],
@@ -628,6 +709,7 @@ def analyze_dual_round(job):
         stereo_hold_delta_deg=_median_or_none([r['delta_deg'] for r in stereo_hold]),
         stereo_ref_sd_deg=_sd_or_none([r['angle_deg'] for r in stereo_ref]),
         stereo_hold_sd_deg=_sd_or_none([r['angle_deg'] for r in stereo_hold]),
+        stereo_ref_noise_p95_deg=stereo_ref_p95,
         stereo_tip_turn_deg=stereo_turn,
         stereo_tip_dx_mm=stereo_tip_delta[0],
         stereo_tip_dy_mm=stereo_tip_delta[1],
@@ -643,7 +725,7 @@ def analyze_dual_round(job):
         ),
     )
 
-    # ---- 5. Steady shapes & hysteresis ----
+    # ---- 5. Steady shapes & optional hysteresis ----
     d405_ref_curve = profiles(d405_ref)
     d405_hold_curve = profiles(d405_hold)
     stereo_ref_curve = profiles(stereo_ref)
@@ -674,31 +756,18 @@ def analyze_dual_round(job):
     )
 
     hysteresis = []
-    hysteresis.extend(_compute_hysteresis_rows(
-        d405_rows, ids, target_mm, repeat, dataset_group, batch_name, quality_flag, 'd405'
-    ))
-    if side_rows:
+    if not steady_only:
         hysteresis.extend(_compute_hysteresis_rows(
-            side_rows, ids, target_mm, repeat, dataset_group, batch_name, quality_flag, 'side_view'
+            d405_rows, ids, target_mm, repeat, dataset_group, batch_name, quality_flag, 'd405'
         ))
-    if stereo_rows:
-        hysteresis.extend(_compute_hysteresis_rows(
-            stereo_rows, ids, target_mm, repeat, dataset_group, batch_name, quality_flag, 'stereo'
-        ))
-
-    # Reference noise p95 for resolution table
-    d405_ref_p95 = (
-        float(np.percentile([abs(r['angle_deg'] - d405_baseline) for r in d405_ref], 95))
-        if d405_ref and d405_baseline is not None
-        else None
-    )
-    stereo_ref_p95 = (
-        float(np.percentile([abs(r['angle_deg'] - stereo_baseline) for r in stereo_ref], 95))
-        if stereo_ref and stereo_baseline is not None
-        else None
-    )
-    round_row['d405_ref_noise_p95_deg'] = d405_ref_p95
-    round_row['stereo_ref_noise_p95_deg'] = stereo_ref_p95
+        if side_rows:
+            hysteresis.extend(_compute_hysteresis_rows(
+                side_rows, ids, target_mm, repeat, dataset_group, batch_name, quality_flag, 'side_view'
+            ))
+        if stereo_rows:
+            hysteresis.extend(_compute_hysteresis_rows(
+                stereo_rows, ids, target_mm, repeat, dataset_group, batch_name, quality_flag, 'stereo'
+            ))
 
     return round_row, steady_shape, hysteresis
 
@@ -765,7 +834,7 @@ def summarize_points(round_rows):
 
 
 def build_single_axis_resolution(all_rounds):
-    """Compute per-axis 1–10 mm resolution and adjacent-level separability for D405 and Stereo."""
+    """Compute per-axis 1–10 mm resolution and adjacent-level separability for D405, Stereo, and Side-view."""
     rows = []
     for modality, delta_key, noise_key in (
         ('d405', 'd405_hold_delta_deg', 'd405_ref_noise_p95_deg'),
@@ -815,66 +884,84 @@ def build_single_axis_resolution(all_rounds):
     return rows
 
 
-def process_batch(batch_spec, output_root, calib_dict, *, workers, scratch_dir, max_dt_ms, max_reproj_px, force):
-    """Extract (if .tar), process all rounds in parallel, and atomically publish batch outputs."""
+def process_batch(batch_spec, output_root, calib_dict, *, workers, max_dt_ms, max_reproj_px,
+                  mode, write_frame_jsonl, force):
+    """Stream-index a NAS .tar (or dir), process rounds in memory, and write compact outputs directly to NAS."""
     batch_dest = Path(output_root) / 'batches' / batch_spec['dataset_group'] / batch_spec['batch_name']
     meta_file = batch_dest / 'batch_meta.json'
     if meta_file.is_file() and not force:
-        print(f"[跳过已完成] {batch_spec['dataset_group']} / {batch_spec['batch_name']}", flush=True)
-        return read_json(meta_file)
+        existing = read_json(meta_file)
+        if existing.get('mode') == mode:
+            print(f"[跳过已完成] {batch_spec['dataset_group']} / {batch_spec['batch_name']} (mode={mode})", flush=True)
+            return existing
 
     batch_dest.parent.mkdir(parents=True, exist_ok=True)
-    scratch_parent = Path(scratch_dir) if scratch_dir else None
-    if scratch_parent is not None:
-        scratch_parent.mkdir(parents=True, exist_ok=True)
+    tar_index = None
+    if batch_spec['source_kind'] == 'tar':
+        print(f"[索引] {batch_spec['source_path']}（直接读 NAS 归档，不解压到本地）", flush=True)
+        tar_index = index_tar_archive(batch_spec['source_path'])
 
-    with tempfile.TemporaryDirectory(prefix=f"ophis_src_{batch_spec['batch_name']}_", dir=scratch_parent) as src_tmp:
-        if batch_spec['source_kind'] == 'tar':
-            print(f"[解压] {batch_spec['source_path']} -> {src_tmp}", flush=True)
-            extracted = safe_extract_tar(batch_spec['source_path'], src_tmp)
-            print(f"       已解压 {extracted} 个文件", flush=True)
-            batch_root = find_batch_root(src_tmp)
-        else:
-            batch_root = Path(batch_spec['source_path'])
+    with BatchReader(batch_spec['source_path'], batch_spec['source_kind'], tar_index) as reader:
+        manifest = reader.read_json('points.json')
 
-        manifest = read_json(batch_root / 'points.json')
-        completed = manifest.get('completed_rounds', [])
-        if not completed:
-            raise ValueError(f"批次中无已完成轮次：{batch_spec['source_path']}")
+    completed = manifest.get('completed_rounds', [])
+    if not completed:
+        raise ValueError(f"批次中无已完成轮次：{batch_spec['source_path']}")
 
-        round_paths = []
+    nas_staging = batch_dest.parent / f".staging_{batch_spec['batch_name']}"
+    if nas_staging.exists():
+        shutil.rmtree(nas_staging)
+    nas_staging.mkdir(parents=True)
+    if write_frame_jsonl:
+        (nas_staging / 'd405_frames').mkdir()
+        (nas_staging / 'side_frames').mkdir()
+        (nas_staging / 'stereo_frames').mkdir()
+
+    try:
+        jobs = []
         for entry in completed:
-            rpath = (batch_root / entry['path']).resolve(strict=True)
-            if rpath.parent != batch_root.resolve():
-                raise ValueError(f'轮次路径越界：{rpath}')
-            round_paths.append(rpath)
+            round_rel = _norm_tar_name(entry['path'])
+            if '/' in round_rel or not round_rel:
+                raise ValueError(f"轮次目录名无效：{entry['path']}")
+            if tar_index is not None:
+                prefix = round_rel + '/'
+                round_idx = {k: v for k, v in tar_index.items() if k.startswith(prefix)}
+            else:
+                round_idx = None
+            jobs.append((
+                batch_spec['source_path'],
+                batch_spec['source_kind'],
+                round_idx,
+                round_rel,
+                str(nas_staging),
+                batch_spec['dataset_group'],
+                batch_spec['batch_name'],
+                batch_spec['quality_flag'],
+                calib_dict,
+                max_dt_ms,
+                max_reproj_px,
+                mode,
+                write_frame_jsonl,
+            ))
 
-        # Stage results locally first, then publish to NAS to minimize SMB random writes.
-        with tempfile.TemporaryDirectory(prefix=f"ophis_out_{batch_spec['batch_name']}_", dir=scratch_parent) as stage_tmp:
-            stage = Path(stage_tmp) / 'batch'
-            (stage / 'd405_frames').mkdir(parents=True)
-            (stage / 'side_frames').mkdir(parents=True)
-            (stage / 'stereo_frames').mkdir(parents=True)
-
-            jobs = [
-                (
-                    str(rpath),
-                    str(stage),
-                    batch_spec['dataset_group'],
-                    batch_spec['batch_name'],
-                    batch_spec['quality_flag'],
-                    calib_dict,
-                    max_dt_ms,
-                    max_reproj_px,
+        round_rows, steady_shapes, hysteresis_rows = [], [], []
+        total = len(jobs)
+        if workers == 1:
+            iterator = map(analyze_dual_round, jobs)
+            for idx, (rrow, sshape, hrows) in enumerate(iterator, 1):
+                round_rows.append(rrow)
+                steady_shapes.append(sshape)
+                hysteresis_rows.extend(hrows)
+                print(
+                    f"  [{batch_spec['batch_name']}] {idx}/{total} {rrow['round_slug']} "
+                    f"D405={rrow['d405_hold_valid']}/{rrow['d405_frames']} "
+                    f"Side={rrow['side_hold_valid']}/{rrow['side_frames']} "
+                    f"Stereo={rrow['stereo_hold_valid']}/{rrow['stereo_paired_frames']}",
+                    flush=True,
                 )
-                for rpath in round_paths
-            ]
-
-            round_rows, steady_shapes, hysteresis_rows = [], [], []
-            total = len(jobs)
-            if workers == 1:
-                results = map(analyze_dual_round, jobs)
-                for idx, (rrow, sshape, hrows) in enumerate(results, 1):
+        else:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                for idx, (rrow, sshape, hrows) in enumerate(pool.map(analyze_dual_round, jobs), 1):
                     round_rows.append(rrow)
                     steady_shapes.append(sshape)
                     hysteresis_rows.extend(hrows)
@@ -885,63 +972,44 @@ def process_batch(batch_spec, output_root, calib_dict, *, workers, scratch_dir, 
                         f"Stereo={rrow['stereo_hold_valid']}/{rrow['stereo_paired_frames']}",
                         flush=True,
                     )
-            else:
-                with ProcessPoolExecutor(max_workers=workers) as pool:
-                    for idx, (rrow, sshape, hrows) in enumerate(pool.map(analyze_dual_round, jobs), 1):
-                        round_rows.append(rrow)
-                        steady_shapes.append(sshape)
-                        hysteresis_rows.extend(hrows)
-                        print(
-                            f"  [{batch_spec['batch_name']}] {idx}/{total} {rrow['round_slug']} "
-                            f"D405={rrow['d405_hold_valid']}/{rrow['d405_frames']} "
-                            f"Side={rrow['side_hold_valid']}/{rrow['side_frames']} "
-                            f"Stereo={rrow['stereo_hold_valid']}/{rrow['stereo_paired_frames']}",
-                            flush=True,
-                        )
 
-            round_rows.sort(key=lambda r: (r['target_q1_mm'], r['target_q2_mm'], r['target_q3_mm'], r['repeat']))
-            steady_shapes.sort(key=lambda s: (*s['target_mm'], s['repeat']))
-            point_rows = summarize_points(round_rows)
+        round_rows.sort(key=lambda r: (r['target_q1_mm'], r['target_q2_mm'], r['target_q3_mm'], r['repeat']))
+        steady_shapes.sort(key=lambda s: (*s['target_mm'], s['repeat']))
+        point_rows = summarize_points(round_rows)
 
-            write_csv(stage / 'rounds.csv', round_rows)
-            write_csv(stage / 'points.csv', point_rows)
-            write_json(stage / 'steady_shapes.json', steady_shapes, compact=True)
-            if hysteresis_rows:
-                write_csv(stage / 'hysteresis.csv', hysteresis_rows)
-            else:
-                write_csv(stage / 'hysteresis.csv', [], fieldnames=[
-                    'dataset_group', 'batch_name', 'quality_flag', 'modality', 'ids',
-                    'target_q1_mm', 'target_q2_mm', 'target_q3_mm', 'repeat',
-                    'matched_displacement_mm', 'advance_delta_deg', 'return_delta_deg',
-                    'return_minus_advance_deg',
-                ])
+        write_csv(nas_staging / 'rounds.csv', round_rows)
+        write_csv(nas_staging / 'points.csv', point_rows)
+        write_json(nas_staging / 'steady_shapes.json', steady_shapes, compact=True)
+        if hysteresis_rows:
+            write_csv(nas_staging / 'hysteresis.csv', hysteresis_rows)
 
-            batch_meta = dict(
-                pipeline_version=PIPELINE_VERSION,
-                completed_at=datetime.now().astimezone().isoformat(),
-                dataset_group=batch_spec['dataset_group'],
-                batch_name=batch_spec['batch_name'],
-                quality_flag=batch_spec['quality_flag'],
-                source_path=batch_spec['source_path'],
-                source_kind=batch_spec['source_kind'],
-                ids=manifest.get('ids'),
-                points_mm=manifest.get('points_mm'),
-                repeats=manifest.get('repeats'),
-                round_count=len(round_rows),
-                stereo_enabled=calib_dict is not None,
-            )
-            write_json(stage / 'batch_meta.json', batch_meta)
+        batch_meta = dict(
+            pipeline_version=PIPELINE_VERSION,
+            mode=mode,
+            write_frame_jsonl=write_frame_jsonl,
+            completed_at=datetime.now().astimezone().isoformat(),
+            dataset_group=batch_spec['dataset_group'],
+            batch_name=batch_spec['batch_name'],
+            quality_flag=batch_spec['quality_flag'],
+            source_path=batch_spec['source_path'],
+            source_kind=batch_spec['source_kind'],
+            ids=manifest.get('ids'),
+            points_mm=manifest.get('points_mm'),
+            repeats=manifest.get('repeats'),
+            round_count=len(round_rows),
+            stereo_enabled=calib_dict is not None,
+        )
+        write_json(nas_staging / 'batch_meta.json', batch_meta)
 
-            # Atomic publish onto NAS: copy to sibling hidden dir, then replace.
-            nas_staging = batch_dest.parent / f".staging_{batch_spec['batch_name']}"
-            if nas_staging.exists():
-                shutil.rmtree(nas_staging)
-            shutil.copytree(stage, nas_staging)
-            if batch_dest.exists():
-                shutil.rmtree(batch_dest)
-            nas_staging.rename(batch_dest)
-            print(f"[完成] {batch_dest}", flush=True)
-            return batch_meta
+        if batch_dest.exists():
+            shutil.rmtree(batch_dest)
+        nas_staging.rename(batch_dest)
+        print(f"[完成] {batch_dest}", flush=True)
+        return batch_meta
+    except BaseException:
+        if nas_staging.exists():
+            shutil.rmtree(nas_staging, ignore_errors=True)
+        raise
 
 
 def aggregate_outputs(output_root, calibration_path=None):
@@ -970,7 +1038,6 @@ def aggregate_outputs(output_root, calibration_path=None):
     if not all_rounds:
         raise ValueError(f'没有可汇总的轮次数据：{batches_dir}')
 
-    # Normalize numeric keys for sorting & point aggregation.
     def _sort_key(r):
         return (
             r['dataset_group'],
@@ -992,7 +1059,6 @@ def aggregate_outputs(output_root, calibration_path=None):
     if all_hysteresis:
         write_csv(output_root / 'all_hysteresis.csv', all_hysteresis)
 
-    # Summary statistics by dataset_group and quality_flag
     group_stats = {}
     for group in sorted({r['dataset_group'] for r in all_rounds}):
         for qflag in sorted({r['quality_flag'] for r in all_rounds if r['dataset_group'] == group}):
@@ -1033,31 +1099,6 @@ def aggregate_outputs(output_root, calibration_path=None):
     return report
 
 
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--nas-root', type=Path, default=DEFAULT_NAS_ROOT,
-                        help=f'NAS 根目录（默认 {DEFAULT_NAS_ROOT}）')
-    parser.add_argument('--output', type=Path, default=None,
-                        help=f'结果保存目录（默认 <nas-root>/{DEFAULT_OUTPUT_NAME}）')
-    parser.add_argument('--calibration', type=Path, default=None,
-                        help='双目标定 JSON 路径（默认优先选用 <nas-root>/OPHIS_双目标定_2026-11-25/stereo_calibration_refined.json）')
-    parser.add_argument('--no-stereo', action='store_true',
-                        help='跳过双目立体三维重建，仅运行 D405 与侧视分析')
-    parser.add_argument('--datasets', nargs='+', choices=list(DATASET_GROUPS.keys()), default=None,
-                        help='仅处理指定数据集分组（默认全部三组）')
-    parser.add_argument('--workers', type=int, default=4, help='单批次内并行进程数（默认 4）')
-    parser.add_argument('--scratch-dir', type=Path, default=None,
-                        help='本地临时解压与暂存目录（默认系统临时目录，每次仅解压一个 .tar）')
-    parser.add_argument('--max-dt-ms', type=float, default=DEFAULT_MAX_DT_MS,
-                        help=f'双机时间配对最大时间差 ms（默认 {DEFAULT_MAX_DT_MS}）')
-    parser.add_argument('--max-reproj-px', type=float, default=DEFAULT_MAX_REPROJ_PX,
-                        help=f'双目三角化最大重投影误差 px（默认 {DEFAULT_MAX_REPROJ_PX}）')
-    parser.add_argument('--force', action='store_true', help='忽略已有断点，重新处理全部批次')
-    parser.add_argument('--aggregate-only', action='store_true', help='仅合并已完成批次生成总表')
-    parser.add_argument('--dry-run', action='store_true', help='仅扫描并打印待处理批次计划，不执行处理')
-    return parser.parse_args(argv)
-
-
 def resolve_calibration_path(nas_root, explicit=None):
     if explicit is not None:
         return Path(explicit)
@@ -1066,6 +1107,33 @@ def resolve_calibration_path(nas_root, explicit=None):
         if candidate.is_file():
             return candidate
     return Path(nas_root) / DEFAULT_CALIBRATION_CANDIDATES[0]
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--nas-root', type=Path, default=DEFAULT_NAS_ROOT,
+                        help=f'NAS 根目录（默认 {DEFAULT_NAS_ROOT}）')
+    parser.add_argument('--output', type=Path, default=None,
+                        help=f'结果保存目录（默认 <nas-root>/{DEFAULT_OUTPUT_NAME}）')
+    parser.add_argument('--calibration', type=Path, default=None,
+                        help='双目标定 JSON 路径（默认优先选用 <nas-root>/OPHIS_双目标定_2026-11-25/stereo_calibration_refined.json）')
+    parser.add_argument('--mode', choices=('steady', 'all'), default='steady',
+                        help='steady（默认）：仅直接读取并计算参考段+目标稳态段帧；all：额外读取推进/回退全过程用于迟滞曲线')
+    parser.add_argument('--save-frame-jsonl', action='store_true',
+                        help='可选：同时在 NAS 批次目录保存逐帧 JSONL 明细（默认关闭，仅保存几 MB 级 CSV/JSON 汇总与稳态中心线）')
+    parser.add_argument('--no-stereo', action='store_true',
+                        help='跳过双目立体三维重建，仅运行 D405 与侧视分析')
+    parser.add_argument('--datasets', nargs='+', choices=list(DATASET_GROUPS.keys()), default=None,
+                        help='仅处理指定数据集分组（默认全部三组）')
+    parser.add_argument('--workers', type=int, default=4, help='单批次内并行进程数（默认 4）')
+    parser.add_argument('--max-dt-ms', type=float, default=DEFAULT_MAX_DT_MS,
+                        help=f'双机时间配对最大时间差 ms（默认 {DEFAULT_MAX_DT_MS}）')
+    parser.add_argument('--max-reproj-px', type=float, default=DEFAULT_MAX_REPROJ_PX,
+                        help=f'双目三角化最大重投影误差 px（默认 {DEFAULT_MAX_REPROJ_PX}）')
+    parser.add_argument('--force', action='store_true', help='忽略已有断点，重新处理全部批次')
+    parser.add_argument('--aggregate-only', action='store_true', help='仅合并已完成批次生成总表')
+    parser.add_argument('--dry-run', action='store_true', help='仅扫描并打印待处理批次计划，不执行处理')
+    return parser.parse_args(argv)
 
 
 def main(argv=None):
@@ -1092,7 +1160,7 @@ def main(argv=None):
         if calib_path.is_file():
             calib_dict = read_json(calib_path)
         elif args.dry_run:
-            print(f'[警告] 未找到双目标定文件：{calib_path}（上传完成后可自动读取）', flush=True)
+            print(f'[警告] 未找到双目标定文件：{calib_path}', flush=True)
         else:
             print(f'错误：未找到双目标定文件 {calib_path}（如暂不做双目重建可加 --no-stereo）', file=sys.stderr)
             return 1
@@ -1100,10 +1168,12 @@ def main(argv=None):
     print(f'NAS 根目录：{nas_root}', flush=True)
     print(f'结果输出目录：{output_root}', flush=True)
     print(f'双目标定文件：{calib_path if calib_dict is not None else "未启用"}', flush=True)
+    print(f'读取模式：{args.mode}（直接读 NAS .tar 进内存，0 本机解压占用；逐帧明细={"开启" if args.save_frame_jsonl else "关闭"}）', flush=True)
     print(f'发现 {len(batches)} 个批次：', flush=True)
     for b in batches:
         size_gb = f"{b['size_bytes'] / 1e9:.2f} GB" if b['size_bytes'] is not None else 'dir'
-        done = (output_root / 'batches' / b['dataset_group'] / b['batch_name'] / 'batch_meta.json').is_file()
+        meta_path = output_root / 'batches' / b['dataset_group'] / b['batch_name'] / 'batch_meta.json'
+        done = meta_path.is_file() and read_json(meta_path).get('mode') == args.mode
         status = '已完成(跳过)' if (done and not args.force) else '待处理'
         flag = f" [标记:{b['quality_flag']}]" if b['quality_flag'] != 'ok' else ''
         print(f"  - {b['dataset_group']:15s} | {b['batch_name']:28s} | {size_gb:9s} | {status}{flag}", flush=True)
@@ -1118,9 +1188,10 @@ def main(argv=None):
             output_root,
             calib_dict,
             workers=args.workers,
-            scratch_dir=args.scratch_dir,
             max_dt_ms=args.max_dt_ms,
             max_reproj_px=args.max_reproj_px,
+            mode=args.mode,
+            write_frame_jsonl=args.save_frame_jsonl,
             force=args.force,
         )
 

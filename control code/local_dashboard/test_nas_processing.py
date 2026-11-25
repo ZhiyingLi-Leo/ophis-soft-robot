@@ -313,7 +313,7 @@ class NasPipelineTests(unittest.TestCase):
             self.assertFalse(out_root.exists())
             self.assertIn('[标记:tip_leak]', buf.getvalue())
 
-            # 2. Full run without pyrealsense2 (tests pure-NumPy fallback + tar extraction + aggregation).
+            # 2. Default steady-mode run without pyrealsense2 (direct .tar byte-range read, 0 local extraction).
             buf = io.StringIO()
             with redirect_stdout(buf), patch.dict(sys.modules, {'pyrealsense2': None}):
                 rc = nas.main(['--nas-root', str(nas_root), '--workers', '1'])
@@ -339,7 +339,11 @@ class NasPipelineTests(unittest.TestCase):
             self.assertEqual(by_slug['ID2_03mm_ID3_05mm_R01']['quality_flag'], 'tip_leak')
             self.assertGreater(int(by_slug['ID1_04mm_R01']['d405_hold_valid']), 0)
             self.assertGreater(int(by_slug['ID1_04mm_R01']['side_hold_valid']), 0)
-            self.assertEqual(int(by_slug['ID1_04mm_R01']['stereo_paired_frames']), 7)
+            # Steady mode only reads the 2 reference + 2 hold frames out of 7.
+            self.assertEqual(int(by_slug['ID1_04mm_R01']['d405_frames']), 4)
+            self.assertEqual(int(by_slug['ID1_04mm_R01']['stereo_paired_frames']), 4)
+            batch_dir = out_root / 'batches' / 'single_axis' / 'ID1_01-05mm'
+            self.assertFalse((batch_dir / 'd405_frames').exists())
 
             # 3. Second run without --force should skip both completed batches.
             buf2 = io.StringIO()
@@ -347,6 +351,17 @@ class NasPipelineTests(unittest.TestCase):
                 rc2 = nas.main(['--nas-root', str(nas_root), '--workers', '1'])
             self.assertEqual(rc2, 0)
             self.assertEqual(buf2.getvalue().count('[跳过已完成]'), 2)
+
+            # 4. --mode all --save-frame-jsonl reads all 7 frames directly from tar and writes frame JSONLs.
+            buf3 = io.StringIO()
+            with redirect_stdout(buf3), patch.dict(sys.modules, {'pyrealsense2': None}):
+                rc3 = nas.main(['--nas-root', str(nas_root), '--workers', '1', '--mode', 'all', '--save-frame-jsonl'])
+            self.assertEqual(rc3, 0)
+            with (out_root / 'all_rounds.csv').open(encoding='utf-8') as stream:
+                all_rows = {r['round_slug']: r for r in csv.DictReader(stream)}
+            self.assertEqual(int(all_rows['ID1_04mm_R01']['d405_frames']), 7)
+            self.assertEqual(int(all_rows['ID1_04mm_R01']['stereo_paired_frames']), 7)
+            self.assertTrue((batch_dir / 'd405_frames' / 'ID1_04mm_R01.jsonl').is_file())
 
 
 if __name__ == '__main__':
