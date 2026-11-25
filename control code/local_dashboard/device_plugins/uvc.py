@@ -385,7 +385,7 @@ class SideViewDevice:
                             event_index='../frames.jsonl')
             (path/'metadata.json').write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding='utf-8')
             index = (path/'frames.jsonl').open('w', encoding='utf-8')
-            rec = dict(path=path, queue=queue.Queue(maxsize=4), stop=threading.Event(),
+            rec = dict(path=path, queue=queue.Queue(maxsize=24), stop=threading.Event(),
                        started=time.monotonic(), next_sample=-math.inf, reason='', size=(stream_format['width'],stream_format['height']))
             rec['thread'] = threading.Thread(target=self._write, args=(rec, index), daemon=True)
             self.recording = rec
